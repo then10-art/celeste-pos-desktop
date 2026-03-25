@@ -15,15 +15,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js 18
         uses: actions/setup-node@v4
         with:
           node-version: "18"
 
       - name: Install dependencies
-        run: npm install --ignore-scripts --legacy-peer-deps
+        run: npm install --legacy-peer-deps
 
-      - name: Build Windows installer (x64 only)
+      - name: Build Windows installer (x64)
         run: npx electron-builder --win --x64
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,38 +37,8 @@ jobs:
             dist/*.yml
           retention-days: 30
 
-  build-mac:
-    name: Build macOS App
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-
-      - name: Install dependencies
-        run: npm install --ignore-scripts --legacy-peer-deps
-
-      - name: Build macOS app
-        run: npx electron-builder --mac --x64
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-app
-          path: |
-            dist/*.dmg
-            dist/*.yml
-          retention-days: 30
-
   release:
-    name: Create GitHub Release
+    name: Publish GitHub Release
     needs: [build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
