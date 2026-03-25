@@ -34,7 +34,7 @@
   "build": {
     "appId": "com.celestepos.desktop",
     "productName": "Celeste POS",
-    "copyright": "Copyright © 2024 Celeste POS",
+    "copyright": "Copyright \u00a9 2024 Celeste POS",
     "icon": "assets/icon.ico",
     "asar": true,
     "asarUnpack": [
@@ -48,11 +48,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico",
@@ -81,7 +85,9 @@
       {
         "from": "assets",
         "to": "assets",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "publish": {
