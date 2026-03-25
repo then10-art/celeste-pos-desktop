@@ -1,106 +1,77 @@
 {
-  "name": "celeste-pos-desktop",
+  "name": "celeste-pos",
   "version": "1.0.0",
-  "description": "Celeste POS - Desktop Application for Windows and macOS",
+  "description": "Celeste POS - Desktop Application",
   "main": "src/main.js",
-  "author": "Celeste POS",
-  "license": "UNLICENSED",
-  "private": true,
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev",
-    "build": "electron-builder --win --x64 --ia32",
+    "build": "electron-builder --win --x64",
     "build:x64": "electron-builder --win --x64",
-    "build:x86": "electron-builder --win --ia32",
-    "build:mac": "electron-builder --mac --x64",
-    "pack": "electron-builder --dir"
-  },
-  "dependencies": {
-    "@node-escpos/core": "^0.6.0",
-    "@node-escpos/network-adapter": "^0.0.1",
-    "@node-escpos/serialport-adapter": "^1.0.0",
-    "@node-escpos/usb-adapter": "^0.3.1",
-    "axios": "^1.6.7",
-    "better-sqlite3": "^12.8.0",
-    "electron-store": "^8.1.0",
-    "electron-updater": "^6.8.3",
-    "node-hid": "^3.3.0",
-    "serialport": "^12.0.0",
-    "ws": "^8.16.0"
-  },
-  "devDependencies": {
-    "electron": "22.3.27",
-    "electron-builder": "^24.9.1"
+    "build:mac": "electron-builder --mac --x64"
   },
   "build": {
-    "appId": "com.celestepos.desktop",
+    "appId": "com.celestepos.app",
     "productName": "Celeste POS",
-    "copyright": "Copyright © 2024 Celeste POS",
-    "icon": "assets/icon.ico",
-    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64",
-            "ia32"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64",
-            "ia32"
-          ]
+          "arch": ["x64"]
         }
       ],
-      "icon": "assets/icon.ico",
-      "requestedExecutionLevel": "asInvoker"
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.business"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "allowElevation": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Celeste POS",
-      "runAfterFinish": true,
-      "perMachine": false,
-      "deleteAppDataOnUninstall": false
+      "include": "installer.nsh"
     },
-    "files": [
-      "src/**/*",
-      "assets/**/*",
-      "node_modules/**/*",
-      "!node_modules/.cache"
-    ],
-    "extraResources": [
-      {
-        "from": "assets",
-        "to": "assets",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
     "publish": {
       "provider": "github",
       "owner": "then10-art",
       "repo": "celeste-pos-desktop"
     },
-    "mac": {
-      "target": [
-        {
-          "target": "dmg",
-          "arch": ["x64", "arm64"]
-        }
-      ],
-      "icon": "assets/icon.icns",
-      "category": "public.app-category.business"
-    }
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**",
+      "node_modules/@serialport/**",
+      "node_modules/node-hid/**",
+      "node_modules/usb/**"
+    ]
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "electron-updater": "^6.3.9",
+    "node-hid": "^3.3.0",
+    "serialport": "^12.0.0",
+    "usb": "^2.17.0"
+  },
+  "devDependencies": {
+    "electron": "^22.3.27",
+    "electron-builder": "^25.1.8"
   }
 }
