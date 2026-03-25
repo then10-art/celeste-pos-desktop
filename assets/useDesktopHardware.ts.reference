@@ -1,0 +1,155 @@
+/**
+ * useDesktopHardware
+ *
+ * Detects whether the app is running inside the Celeste POS Electron desktop
+ * wrapper and exposes hardware helpers that transparently route to either:
+ *   - window.CelesteDesktop (Electron IPC → native ESC/POS printer / cash drawer)
+ *   - Browser fallback (window.open / window.print)
+ *
+ * Usage:
+ *   const { isDesktop, printReceipt, openCashDrawer, printerStatus } = useDesktopHardware();
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import { generateReceiptHTML, type ReceiptData, printViaBrowser } from "@/lib/escpos";
+
+// Type declaration for the Electron preload bridge
+declare global {
+  interface Window {
+    CelesteDesktop?: {
+      isDesktop: boolean;
+      printReceipt: (receiptData: ReceiptData, paperSize?: string) => Promise<{ success: boolean; error?: string }>;
+      openCashDrawer: () => Promise<{ success: boolean; error?: string }>;
+      getPrinterStatus: () => Promise<{ connected: boolean; name?: string; type?: string }>;
+      onOfflineStatus: (cb: (isOffline: boolean) => void) => void;
+      onSyncComplete: (cb: (result: { queued: number; synced: number }) => void) => void;
+      getQueuedCount: () => Promise<number>;
+    };
+  }
+}
+
+export interface DesktopHardwareState {
+  /** True when running inside the Electron desktop wrapper */
+  isDesktop: boolean;
+  /** True when a thermal printer is connected (desktop only) */
+  printerConnected: boolean;
+  /** Name/type of the connected printer */
+  printerName: string | null;
+  /** Number of offline transactions queued for sync */
+  offlineQueueCount: number;
+  /**
+   * Print a receipt.
+   * - Desktop: sends ESC/POS commands directly to the thermal printer
+   * - Browser: opens a print-optimised window (existing behaviour)
+   */
+  printReceipt: (receiptData: ReceiptData, paperSize?: string) => Promise<void>;
+  /**
+   * Open the cash drawer.
+   * - Desktop: sends ESC/POS kick command via the printer port
+   * - Browser: shows a toast (no hardware access)
+   */
+  openCashDrawer: () => Promise<void>;
+}
+
+export function useDesktopHardware(): DesktopHardwareState {
+  const isDesktop = typeof window !== "undefined" && !!window.CelesteDesktop?.isDesktop;
+
+  const [printerConnected, setPrinterConnected] = useState(false);
+  const [printerName, setPrinterName] = useState<string | null>(null);
+  const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+
+  // Poll printer status and offline queue when running in desktop mode
+  useEffect(() => {
+    if (!isDesktop) return;
+
+    const checkPrinter = async () => {
+      try {
+        const status = await window.CelesteDesktop!.getPrinterStatus();
+        setPrinterConnected(status.connected);
+        setPrinterName(status.name ?? null);
+      } catch {
+        setPrinterConnected(false);
+      }
+    };
+
+    const checkQueue = async () => {
+      try {
+        const count = await window.CelesteDesktop!.getQueuedCount();
+        setOfflineQueueCount(count);
+      } catch {
+        setOfflineQueueCount(0);
+      }
+    };
+
+    // Initial checks
+    checkPrinter();
+    checkQueue();
+
+    // Refresh every 30 seconds
+    const interval = setInterval(() => {
+      checkPrinter();
+      checkQueue();
+    }, 30_000);
+
+    // Listen for sync completion events
+    window.CelesteDesktop!.onSyncComplete((result) => {
+      if (result.synced > 0) {
+        setOfflineQueueCount(Math.max(0, result.queued - result.synced));
+      }
+    });
+
+    return () => clearInterval(interval);
+  }, [isDesktop]);
+
+  const printReceipt = useCallback(
+    async (receiptData: ReceiptData, paperSize = "80") => {
+      if (isDesktop && window.CelesteDesktop) {
+        // Route through Electron IPC → native ESC/POS printer
+        try {
+          const result = await window.CelesteDesktop.printReceipt(receiptData, paperSize);
+          if (!result.success) {
+            console.warn("[Desktop] Printer error:", result.error);
+            // Fall back to browser print if native print fails
+            const html = generateReceiptHTML(receiptData, undefined, paperSize);
+            printViaBrowser(html, paperSize);
+          }
+        } catch (err) {
+          console.warn("[Desktop] printReceipt IPC failed, falling back to browser:", err);
+          const html = generateReceiptHTML(receiptData, undefined, paperSize);
+          printViaBrowser(html, paperSize);
+        }
+      } else {
+        // Standard browser print path (unchanged behaviour)
+        const html = generateReceiptHTML(receiptData, undefined, paperSize);
+        printViaBrowser(html, paperSize);
+      }
+    },
+    [isDesktop]
+  );
+
+  const openCashDrawer = useCallback(async () => {
+    if (isDesktop && window.CelesteDesktop) {
+      try {
+        const result = await window.CelesteDesktop.openCashDrawer();
+        if (!result.success) {
+          console.warn("[Desktop] Cash drawer error:", result.error);
+        }
+      } catch (err) {
+        console.warn("[Desktop] openCashDrawer IPC failed:", err);
+      }
+    } else {
+      // Browser has no hardware access — silently no-op
+      // (The POS UI already handles the "open drawer" instruction visually)
+      console.info("[Browser] Cash drawer not available in browser mode.");
+    }
+  }, [isDesktop]);
+
+  return {
+    isDesktop,
+    printerConnected,
+    printerName,
+    offlineQueueCount,
+    printReceipt,
+    openCashDrawer,
+  };
+}
