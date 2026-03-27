@@ -4,25 +4,177 @@
  *   - ESC/POS receipt printers (USB, Network, Serial)
  *   - USB barcode scanners (HID - plug and play, keyboard emulation)
  *   - Cash drawers (via printer port RJ11)
+ *   - Windows printer detection via Electron webContents.getPrinters()
  */
 
-let printerConfig = { type: 'usb', address: '' };
+let printerConfig = { type: 'usb', address: '', printerName: '' };
+let mainWindowRef = null;
+
+// ─── Known receipt printer name patterns ─────────────────────────────────────
+const RECEIPT_PRINTER_PATTERNS = [
+  /80mm/i,
+  /58mm/i,
+  /receipt/i,
+  /thermal/i,
+  /pos[\s-]?printer/i,
+  /epson\s*tm/i,
+  /star\s*tsp/i,
+  /star\s*sm/i,
+  /bixolon/i,
+  /citizen/i,
+  /sewoo/i,
+  /xprinter/i,
+  /rongta/i,
+  /munbyn/i,
+  /disashop/i,
+  /escpos/i,
+  /esc[\s\/]pos/i,
+];
+
+// Printer names to exclude (regular document printers, fax, etc.)
+const EXCLUDED_PATTERNS = [
+  /microsoft/i,
+  /xps/i,
+  /pdf/i,
+  /onenote/i,
+  /fax/i,
+  /snagit/i,
+  /adobe/i,
+  /foxit/i,
+  /cute/i,
+  /virtual/i,
+  /remote/i,
+];
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
-async function setupHardware(config = {}) {
+async function setupHardware(config = {}, win = null) {
   printerConfig = { ...printerConfig, ...config };
+  mainWindowRef = win;
   console.log('[Hardware] Initialized with config:', printerConfig);
 }
 
-// ─── Discover Connected Devices ───────────────────────────────────────────────
-async function getConnectedDevices() {
-  const devices = [];
+// ─── Get Printer Status ──────────────────────────────────────────────────────
+async function getPrinterStatus() {
+  // If a specific printer is configured by name, check if it's in the system list
+  if (printerConfig.printerName && mainWindowRef) {
+    try {
+      const printers = mainWindowRef.webContents.getPrinters();
+      const configured = printers.find(p => p.name === printerConfig.printerName);
+      if (configured) {
+        return {
+          connected: configured.status === 0, // 0 = ready
+          name: configured.name,
+          type: printerConfig.type || 'usb',
+        };
+      }
+    } catch { /* fall through */ }
+  }
 
-  // USB printers via node-hid (vendor ID detection)
+  // Auto-detect: find the first receipt printer in the system
+  if (mainWindowRef) {
+    try {
+      const printers = mainWindowRef.webContents.getPrinters();
+      const receiptPrinter = findReceiptPrinter(printers);
+      if (receiptPrinter) {
+        return {
+          connected: receiptPrinter.status === 0,
+          name: receiptPrinter.name,
+          type: 'usb',
+        };
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Fallback: try USB device detection via node-hid
   try {
     const HID = require('node-hid');
     const hidDevices = HID.devices();
-    const printerVendors = [0x04b8, 0x0519, 0x154f, 0x0dd4]; // Epson, Star, SNBC, Custom
+    const printerVendors = [0x04b8, 0x0519, 0x154f, 0x0dd4, 0x0416, 0x0493];
+    for (const d of hidDevices) {
+      if (printerVendors.includes(d.vendorId)) {
+        return {
+          connected: true,
+          name: d.product || `USB Printer (VID:${d.vendorId.toString(16)})`,
+          type: 'usb',
+        };
+      }
+    }
+  } catch { /* node-hid optional */ }
+
+  return { connected: false, name: null, type: null };
+}
+
+// ─── Find Receipt Printer from System Printers ──────────────────────────────
+function findReceiptPrinter(printers) {
+  // First pass: look for known receipt printer patterns
+  for (const p of printers) {
+    if (EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) continue;
+    if (RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name))) {
+      return p;
+    }
+  }
+
+  // Second pass: look for USB Receipt Printer (generic name)
+  for (const p of printers) {
+    if (p.name.toLowerCase().includes('usb') && !EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) {
+      return p;
+    }
+  }
+
+  return null;
+}
+
+// ─── Get Available Printers (for config dialog) ─────────────────────────────
+async function getAvailablePrinters() {
+  const result = [];
+
+  // System printers via Electron API
+  if (mainWindowRef) {
+    try {
+      const printers = mainWindowRef.webContents.getPrinters();
+      for (const p of printers) {
+        const isReceipt = RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name));
+        const isExcluded = EXCLUDED_PATTERNS.some(rx => rx.test(p.name));
+        result.push({
+          name: p.name,
+          displayName: p.displayName || p.name,
+          status: p.status === 0 ? 'ready' : 'offline',
+          isDefault: p.isDefault,
+          isReceipt: isReceipt && !isExcluded,
+          type: 'system',
+        });
+      }
+    } catch { /* ignore */ }
+  }
+
+  return result;
+}
+
+// ─── Discover Connected Devices ──────────────────────────────────────────────
+async function getConnectedDevices() {
+  const devices = [];
+
+  // System printers via Electron
+  if (mainWindowRef) {
+    try {
+      const printers = mainWindowRef.webContents.getPrinters();
+      for (const p of printers) {
+        if (!EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) {
+          devices.push({
+            type: 'printer',
+            name: p.name,
+            status: p.status === 0 ? 'Listo' : 'Sin conexión',
+          });
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // USB HID devices
+  try {
+    const HID = require('node-hid');
+    const hidDevices = HID.devices();
+    const printerVendors = [0x04b8, 0x0519, 0x154f, 0x0dd4, 0x0416, 0x0493];
     for (const d of hidDevices) {
       if (printerVendors.includes(d.vendorId)) {
         devices.push({ type: 'printer', name: `USB Printer (VID:${d.vendorId.toString(16)})`, vendorId: d.vendorId });
@@ -35,19 +187,13 @@ async function getConnectedDevices() {
     const { SerialPort } = require('serialport');
     const ports = await SerialPort.list();
     for (const p of ports) {
-      if (p.manufacturer?.toLowerCase().includes('epson') ||
-          p.manufacturer?.toLowerCase().includes('star')) {
-        devices.push({ type: 'printer', name: `Serial Printer (${p.path})`, path: p.path });
+      if (p.manufacturer) {
+        devices.push({ type: 'serial', name: `${p.manufacturer} (${p.path})`, path: p.path });
       }
     }
   } catch { /* serialport optional */ }
 
-  // Network printer (if configured)
-  if (printerConfig.type === 'network' && printerConfig.address) {
-    devices.push({ type: 'printer', name: `Network Printer (${printerConfig.address})`, address: printerConfig.address });
-  }
-
-  // Barcode scanners (HID keyboard emulation — most USB scanners)
+  // Barcode scanners (HID keyboard emulation)
   try {
     const HID = require('node-hid');
     const hidDevices = HID.devices();
@@ -63,13 +209,131 @@ async function getConnectedDevices() {
 }
 
 // ─── Print Receipt ────────────────────────────────────────────────────────────
-async function printReceipt(receiptData) {
+async function printReceipt(receiptData, paperSize) {
   if (printerConfig.type === 'network') return printNetwork(receiptData);
   if (printerConfig.type === 'serial')  return printSerial(receiptData);
+
+  // Try Windows system printer first (works with "80mm Series Printer" and similar)
+  if (printerConfig.printerName || mainWindowRef) {
+    try {
+      return await printViaSystem(receiptData, paperSize);
+    } catch (err) {
+      console.warn('[Hardware] System print failed, trying USB direct:', err.message);
+    }
+  }
+
   return printUsb(receiptData);
 }
 
-// ─── USB Printing ─────────────────────────────────────────────────────────────
+// ─── System Printer (Windows GDI) ────────────────────────────────────────────
+// Uses Electron's webContents.print() to send to a named Windows printer
+async function printViaSystem(receiptData, paperSize = '80') {
+  if (!mainWindowRef) throw new Error('No window reference');
+
+  const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
+  if (!printerName) throw new Error('No receipt printer found');
+
+  // Build simple HTML receipt for system printing
+  const html = buildReceiptHTML(receiptData, paperSize);
+
+  return new Promise((resolve, reject) => {
+    // Create a hidden window for printing
+    const { BrowserWindow } = require('electron');
+    const printWin = new BrowserWindow({
+      show: false,
+      width: paperSize === '58' ? 220 : 302,
+      height: 900,
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+
+    printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+    printWin.webContents.on('did-finish-load', () => {
+      printWin.webContents.print(
+        {
+          silent: true,
+          printBackground: true,
+          deviceName: printerName,
+          margins: { marginType: 'none' },
+        },
+        (success, failureReason) => {
+          printWin.close();
+          if (success) {
+            resolve({ success: true });
+          } else {
+            reject(new Error(failureReason || 'Print failed'));
+          }
+        }
+      );
+    });
+
+    // Timeout safety
+    setTimeout(() => {
+      try { printWin.close(); } catch { /* ignore */ }
+      reject(new Error('Print timeout'));
+    }, 15000);
+  });
+}
+
+// ─── Auto-detect printer name ────────────────────────────────────────────────
+async function getAutoDetectedPrinterName() {
+  if (!mainWindowRef) return null;
+  try {
+    const printers = mainWindowRef.webContents.getPrinters();
+    const receipt = findReceiptPrinter(printers);
+    return receipt?.name || null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Build Receipt HTML ──────────────────────────────────────────────────────
+function buildReceiptHTML(receiptData, paperSize = '80') {
+  const width = paperSize === '58' ? '48mm' : '72mm';
+  let body = '';
+
+  for (const line of (receiptData.lines || [])) {
+    switch (line.type) {
+      case 'title':
+        body += `<div style="text-align:center;font-weight:bold;font-size:16px;text-decoration:underline;margin:4px 0">${escapeHtml(line.text)}</div>`;
+        break;
+      case 'subtitle':
+        body += `<div style="text-align:center;font-weight:bold;font-size:12px;margin:2px 0">${escapeHtml(line.text)}</div>`;
+        break;
+      case 'text': {
+        const align = line.align === 'right' ? 'right' : line.align === 'center' ? 'center' : 'left';
+        body += `<div style="text-align:${align};font-size:11px;margin:1px 0">${escapeHtml(line.text)}</div>`;
+        break;
+      }
+      case 'row':
+        body += `<div style="display:flex;justify-content:space-between;font-size:11px;margin:1px 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
+        break;
+      case 'bold-row':
+        body += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:bold;margin:1px 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
+        break;
+      case 'divider':
+        body += `<div style="border-top:1px dashed #000;margin:4px 0"></div>`;
+        break;
+      case 'barcode':
+        body += `<div style="text-align:center;font-family:monospace;font-size:14px;margin:4px 0">*${escapeHtml(line.value || '')}*</div>`;
+        break;
+      case 'spacer':
+        body += `<div style="height:8px"></div>`;
+        break;
+    }
+  }
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    @page { size: ${width} auto; margin: 0; }
+    body { font-family: 'Courier New', monospace; width: ${width}; margin: 0; padding: 2mm; }
+  </style></head><body>${body}</body></html>`;
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ─── USB Printing (ESC/POS direct) ───────────────────────────────────────────
 async function printUsb(receiptData) {
   const { Printer } = require('@node-escpos/core');
   const USB = require('@node-escpos/usb-adapter');
@@ -79,7 +343,7 @@ async function printUsb(receiptData) {
     device.open(async (err) => {
       if (err) return reject(new Error(`USB printer error: ${err.message}`));
       const printer = new Printer(device, { encoding: 'ISO-8859-1' });
-      await buildReceipt(printer, receiptData);
+      await buildEscPosReceipt(printer, receiptData);
       printer.close(() => resolve({ success: true }));
     });
   });
@@ -98,7 +362,7 @@ async function printNetwork(receiptData) {
     device.open(async (err) => {
       if (err) return reject(new Error(`Network printer error: ${err.message}`));
       const printer = new Printer(device, { encoding: 'ISO-8859-1' });
-      await buildReceipt(printer, receiptData);
+      await buildEscPosReceipt(printer, receiptData);
       printer.close(() => resolve({ success: true }));
     });
   });
@@ -114,14 +378,14 @@ async function printSerial(receiptData) {
     device.open(async (err) => {
       if (err) return reject(new Error(`Serial printer error: ${err.message}`));
       const printer = new Printer(device, { encoding: 'ISO-8859-1' });
-      await buildReceipt(printer, receiptData);
+      await buildEscPosReceipt(printer, receiptData);
       printer.close(() => resolve({ success: true }));
     });
   });
 }
 
 // ─── ESC/POS Receipt Builder ──────────────────────────────────────────────────
-async function buildReceipt(printer, receiptData) {
+async function buildEscPosReceipt(printer, receiptData) {
   for (const line of (receiptData.lines || [])) {
     switch (line.type) {
       case 'title':
@@ -197,4 +461,4 @@ async function openCashDrawer() {
   }
 }
 
-module.exports = { setupHardware, printReceipt, openCashDrawer, getConnectedDevices };
+module.exports = { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters };

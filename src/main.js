@@ -33,7 +33,7 @@ const store = new Store({
     isMaximized: false,
     autoLaunch: false,
     offlineMode: false,
-    printerConfig: { type: 'usb', address: '' },
+    printerConfig: { type: 'usb', address: '', printerName: '' },
     cashDrawerConfig: { type: 'printer' },
   }
 });
@@ -43,11 +43,13 @@ let mainWindow = null;
 let tray = null;
 let isOnline = true;
 let syncInterval = null;
+// Track whether the user manually triggered the update check (for error dialog)
+let userTriggeredUpdateCheck = false;
 
 // ─── Sync & Offline Modules ───────────────────────────────────────────────────
 const { initDatabase, getOfflineQueue, clearSyncedItems } = require('./database');
 const { syncWithCloud } = require('./sync');
-const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices } = require('./hardware');
+const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters } = require('./hardware');
 
 // ─── Window Creation ──────────────────────────────────────────────────────────
 function createWindow() {
@@ -146,9 +148,8 @@ function createTray() {
     },
     { type: 'separator' },
     {
-      label: 'Estado de Conexión',
-      enabled: false,
       label: isOnline ? '🟢 En línea' : '🔴 Sin conexión',
+      enabled: false,
     },
     { type: 'separator' },
     {
@@ -339,6 +340,13 @@ async function syncOfflineQueue() {
     clearSyncedItems(synced);
     console.log(`[Sync] Successfully synced ${synced.length} items`);
 
+    // Notify the renderer about sync completion via IPC
+    const remaining = getOfflineQueue().length;
+    mainWindow?.webContents.send('sync-complete', {
+      queued: remaining,
+      synced: synced.length,
+    });
+
     mainWindow?.webContents.executeJavaScript(`
       if (window.__celesteShowToast) {
         window.__celesteShowToast('${synced.length} transacciones sincronizadas con la nube', 'success');
@@ -373,18 +381,42 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-not-available', () => {
     console.log('[Updater] No updates available.');
+    if (userTriggeredUpdateCheck) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Sin Actualizaciones',
+        message: `Celeste POS v${app.getVersion()} está actualizado.`,
+      });
+      userTriggeredUpdateCheck = false;
+    }
   });
 
   autoUpdater.on('error', (err) => {
     console.error('[Updater] Error:', err.message);
-    // Don't show error dialog on startup check - only show if user manually triggered
+    if (userTriggeredUpdateCheck) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Error de Actualización',
+        message: `No se pudo verificar actualizaciones.\n\nAsegúrese de tener conexión a internet e intente de nuevo más tarde.`,
+        detail: err.message,
+      });
+      userTriggeredUpdateCheck = false;
+    }
   });
 
   autoUpdater.on('download-progress', (progress) => {
-    console.log(`[Updater] Download progress: ${Math.round(progress.percent)}%`);
+    const pct = Math.round(progress.percent);
+    console.log(`[Updater] Download progress: ${pct}%`);
+    // Update taskbar progress on Windows
+    if (mainWindow) {
+      mainWindow.setProgressBar(progress.percent / 100);
+    }
   });
 
   autoUpdater.on('update-downloaded', (info) => {
+    // Clear taskbar progress
+    if (mainWindow) mainWindow.setProgressBar(-1);
+
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Actualización Lista',
@@ -414,29 +446,32 @@ function checkForUpdates(showNoUpdateDialog = false) {
       dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Actualizaciones',
-        message: 'El módulo de actualizaciones no está disponible.',
+        message: 'El módulo de actualizaciones no está disponible. Visite celestepos.live para descargar la última versión.',
       });
     }
     return;
   }
 
+  userTriggeredUpdateCheck = showNoUpdateDialog;
+
   // electron-updater reads the publish config from package.json automatically
-  // No need to call setFeedURL - just trigger the check
   autoUpdater.checkForUpdates().catch((err) => {
     console.error('[Updater] checkForUpdates error:', err.message);
     if (showNoUpdateDialog) {
       dialog.showMessageBox(mainWindow, {
         type: 'warning',
         title: 'Error de Actualización',
-        message: `No se pudo verificar actualizaciones: ${err.message}`,
+        message: 'No se pudo verificar actualizaciones.\n\nAsegúrese de tener conexión a internet e intente de nuevo más tarde.',
+        detail: err.message,
       });
     }
+    userTriggeredUpdateCheck = false;
   });
 }
 
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
-ipcMain.handle('print-receipt', async (event, receiptData) => {
-  return await printReceipt(receiptData);
+ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
+  return await printReceipt(receiptData, paperSize);
 });
 
 ipcMain.handle('open-cash-drawer', async () => {
@@ -445,6 +480,21 @@ ipcMain.handle('open-cash-drawer', async () => {
 
 ipcMain.handle('get-devices', async () => {
   return await getConnectedDevices();
+});
+
+ipcMain.handle('get-printer-status', async () => {
+  return await getPrinterStatus();
+});
+
+ipcMain.handle('get-available-printers', async () => {
+  return await getAvailablePrinters();
+});
+
+ipcMain.handle('save-printer-config', (event, config) => {
+  store.set('printerConfig', config);
+  // Re-initialize hardware with new config, passing mainWindow for system printer access
+  setupHardware(config, mainWindow);
+  return true;
 });
 
 ipcMain.handle('get-settings', () => {
@@ -462,6 +512,10 @@ ipcMain.handle('get-offline-status', () => {
   return { isOnline, queueLength: getOfflineQueue().length };
 });
 
+ipcMain.handle('get-queued-count', () => {
+  return getOfflineQueue().length;
+});
+
 ipcMain.handle('queue-offline-transaction', (event, transaction) => {
   const { queueTransaction } = require('./database');
   queueTransaction(transaction);
@@ -477,11 +531,58 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
 });
 
 // ─── Helper Dialogs ───────────────────────────────────────────────────────────
-function openPrinterConfig() {
+async function openPrinterConfig() {
   mainWindow.show();
-  mainWindow.webContents.executeJavaScript(
-    "window.dispatchEvent(new CustomEvent('celeste-open-printer-config'));"
-  ).catch(() => {});
+
+  // Get available printers and show a native dialog for selection
+  try {
+    const printers = await getAvailablePrinters();
+    const receiptPrinters = printers.filter(p => !['Microsoft XPS Document Writer', 'Fax', 'Microsoft Print to PDF'].includes(p.name));
+
+    if (receiptPrinters.length === 0) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Configurar Impresora',
+        message: 'No se encontraron impresoras instaladas.\n\nAsegúrese de que la impresora esté conectada y tenga los drivers instalados.',
+      });
+      return;
+    }
+
+    const currentPrinter = store.get('printerConfig.printerName') || '(ninguna)';
+    const printerNames = receiptPrinters.map(p => {
+      const status = p.status === 'ready' ? '✓' : '✗';
+      const receipt = p.isReceipt ? ' [Recibo]' : '';
+      return `${status} ${p.name}${receipt}`;
+    });
+
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: 'Configurar Impresora',
+      message: `Impresora actual: ${currentPrinter}\n\nSeleccione la impresora de recibos:`,
+      buttons: [...printerNames, 'Cancelar'],
+      defaultId: 0,
+      cancelId: printerNames.length,
+    });
+
+    if (response < receiptPrinters.length) {
+      const selected = receiptPrinters[response];
+      const newConfig = {
+        type: selected.type === 'network' ? 'network' : 'usb',
+        address: store.get('printerConfig.address') || '',
+        printerName: selected.name,
+      };
+      store.set('printerConfig', newConfig);
+      setupHardware(newConfig, mainWindow);
+
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Impresora Configurada',
+        message: `Impresora seleccionada: ${selected.name}\n\nUse "Probar Impresora" para verificar que funciona correctamente.`,
+      });
+    }
+  } catch (err) {
+    dialog.showErrorBox('Error', `No se pudo obtener la lista de impresoras: ${err.message}`);
+  }
 }
 
 async function testPrinter() {
@@ -510,7 +611,7 @@ async function testPrinter() {
 async function showConnectedDevices() {
   const devices = await getConnectedDevices();
   const list = devices.length > 0
-    ? devices.map(d => `• ${d.name} (${d.type})`).join('\n')
+    ? devices.map(d => `• ${d.name} (${d.type})${d.status ? ' — ' + d.status : ''}`).join('\n')
     : 'No se encontraron dispositivos conectados.';
 
   dialog.showMessageBox(mainWindow, {
@@ -535,11 +636,11 @@ app.whenReady().then(async () => {
   // Initialize local database
   await initDatabase();
 
-  // Setup hardware
-  await setupHardware(store.get('printerConfig'));
-
-  // Create main window
+  // Create main window first (needed for printer detection via webContents.getPrinters())
   createWindow();
+
+  // Setup hardware with mainWindow reference for system printer access
+  await setupHardware(store.get('printerConfig'), mainWindow);
 
   // Create system tray
   createTray();
@@ -550,9 +651,9 @@ app.whenReady().then(async () => {
   // Setup auto-updater event listeners
   setupAutoUpdater();
 
-  // Check for updates on startup (after 5 seconds, silent - no dialog if no update)
+  // Check for updates on startup (after 10 seconds, silent - no dialog if no update or error)
   if (!isDev) {
-    setTimeout(() => checkForUpdates(false), 5000);
+    setTimeout(() => checkForUpdates(false), 10000);
   }
 });
 

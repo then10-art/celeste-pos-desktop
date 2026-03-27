@@ -5,16 +5,62 @@
  */
 
 const { contextBridge, ipcRenderer } = require('electron');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+
+// ─── Machine Identity ────────────────────────────────────────────────────────
+// Generate a stable machine ID persisted in %APPDATA%/CelestePOS/machine-id.txt
+function getMachineId() {
+  try {
+    const appDataDir = path.join(
+      process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+      'CelestePOS'
+    );
+    const idFile = path.join(appDataDir, 'machine-id.txt');
+
+    if (fs.existsSync(idFile)) {
+      return fs.readFileSync(idFile, 'utf-8').trim();
+    }
+
+    // Generate new ID based on hostname + random suffix
+    const id = `${os.hostname()}-${crypto.randomBytes(4).toString('hex')}`;
+    fs.mkdirSync(appDataDir, { recursive: true });
+    fs.writeFileSync(idFile, id, 'utf-8');
+    return id;
+  } catch {
+    // Fallback to hostname only
+    return os.hostname();
+  }
+}
+
+const machineId = getMachineId();
+const machineName = os.hostname();
+
+// ─── Sync event listeners ────────────────────────────────────────────────────
+const syncListeners = [];
+
+ipcRenderer.on('sync-complete', (_event, result) => {
+  for (const cb of syncListeners) {
+    try { cb(result); } catch { /* ignore listener errors */ }
+  }
+});
 
 // ─── Expose Desktop API to Web App ───────────────────────────────────────────
 contextBridge.exposeInMainWorld('CelesteDesktop', {
   // ── Identity ──────────────────────────────────────────────────────────────
   isDesktop: true,
   version: process.versions.electron,
+  machineId,
+  machineName,
 
   // ── Hardware: Receipt Printer ─────────────────────────────────────────────
-  printReceipt: (receiptData) =>
-    ipcRenderer.invoke('print-receipt', receiptData),
+  printReceipt: (receiptData, paperSize) =>
+    ipcRenderer.invoke('print-receipt', receiptData, paperSize),
+
+  getPrinterStatus: () =>
+    ipcRenderer.invoke('get-printer-status'),
 
   // ── Hardware: Cash Drawer ─────────────────────────────────────────────────
   openCashDrawer: () =>
@@ -23,6 +69,13 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   // ── Hardware: Device Discovery ────────────────────────────────────────────
   getConnectedDevices: () =>
     ipcRenderer.invoke('get-devices'),
+
+  // ── Printer Configuration ─────────────────────────────────────────────────
+  getAvailablePrinters: () =>
+    ipcRenderer.invoke('get-available-printers'),
+
+  savePrinterConfig: (config) =>
+    ipcRenderer.invoke('save-printer-config', config),
 
   // ── Settings ──────────────────────────────────────────────────────────────
   getSettings: () =>
@@ -35,8 +88,20 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   getOfflineStatus: () =>
     ipcRenderer.invoke('get-offline-status'),
 
+  getQueuedCount: () =>
+    ipcRenderer.invoke('get-queued-count'),
+
   queueOfflineTransaction: (transaction) =>
     ipcRenderer.invoke('queue-offline-transaction', transaction),
+
+  onSyncComplete: (callback) => {
+    syncListeners.push(callback);
+    // Return cleanup function
+    return () => {
+      const idx = syncListeners.indexOf(callback);
+      if (idx !== -1) syncListeners.splice(idx, 1);
+    };
+  },
 
   // ── File System ───────────────────────────────────────────────────────────
   showSaveDialog: (options) =>

@@ -22,6 +22,9 @@
 - [x] Cash drawer kick command (ESC p via printer port)
 - [x] Barcode scanner detection (HID)
 - [x] IPC handlers: print-receipt, open-cash-drawer, get-devices
+- [x] System printer detection via Electron webContents.getPrinters()
+- [x] Auto-detect receipt printers by name pattern (80mm, thermal, receipt, etc.)
+- [x] Configurar Impresora dialog — native printer selection from system printers
 - [ ] Test with real Epson TM-T20 / Star TSP100 (requires Windows hardware)
 - [ ] ZPL label printer support (future)
 
@@ -30,9 +33,19 @@
 - [x] Auto-start registry entry (optional, user-toggleable)
 - [x] URL protocol handler (celestepos://)
 - [ ] Code signing certificate (required for Windows SmartScreen bypass)
+- [x] Auto-updater error handling — no crash on missing update server
+- [x] User-triggered update shows "up to date" or friendly error message
+- [x] Download progress bar in Windows taskbar
 - [ ] Upload installer to celestepos.live/updates/ for auto-update
 
 ## Phase 5 — Web App Integration
+- [x] preload.js: getPrinterStatus, getQueuedCount, onSyncComplete exposed
+- [x] preload.js: machineId and machineName for PC-to-register locking
+- [x] preload.js: getAvailablePrinters and savePrinterConfig for config dialog
+- [x] main.js: sync-complete IPC event sent to renderer after offline sync
+- [x] main.js: get-printer-status, get-available-printers, save-printer-config IPC handlers
+- [x] main.js: get-queued-count IPC handler
+- [x] hardware: printViaSystem using Windows GDI for generic receipt printers
 - [ ] Add CelesteDesktop.printReceipt() call in POS receipt flow
 - [ ] Add CelesteDesktop.openCashDrawer() call after successful payment
 - [ ] Add desktop detection banner/badge in web app UI
