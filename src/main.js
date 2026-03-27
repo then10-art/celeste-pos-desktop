@@ -366,10 +366,17 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('update-available', (info) => {
+    const notes = info.releaseNotes
+      ? (typeof info.releaseNotes === 'string' ? info.releaseNotes : info.releaseNotes.map(n => n.note || n).join('\n'))
+      : '';
+    const detailText = notes
+      ? `\n\nNovedades:\n${notes.replace(/<[^>]*>/g, '').substring(0, 500)}`
+      : '';
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Actualización Disponible',
       message: `Hay una nueva versión de Celeste POS disponible (v${info.version}). ¿Desea descargarla ahora?`,
+      detail: detailText || undefined,
       buttons: ['Descargar', 'Más Tarde'],
       defaultId: 0
     }).then(({ response }) => {
@@ -417,10 +424,17 @@ function setupAutoUpdater() {
     // Clear taskbar progress
     if (mainWindow) mainWindow.setProgressBar(-1);
 
+    const notes = info.releaseNotes
+      ? (typeof info.releaseNotes === 'string' ? info.releaseNotes : info.releaseNotes.map(n => n.note || n).join('\n'))
+      : '';
+    const detailText = notes
+      ? `\nNovedades:\n${notes.replace(/<[^>]*>/g, '').substring(0, 500)}`
+      : '';
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Actualización Lista',
       message: `La versión ${info.version} está lista para instalar. ¿Desea reiniciar ahora?`,
+      detail: detailText || undefined,
       buttons: ['Reiniciar Ahora', 'Más Tarde'],
       defaultId: 0
     }).then(({ response }) => {

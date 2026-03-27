@@ -60,3 +60,63 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-server:
+    name: Notify CelestePOS Server
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download Windows artifacts (for latest.yml parsing)
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/
+
+      - name: Parse latest.yml and notify server
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Version: $VERSION"
+
+          # Parse latest.yml from electron-builder output
+          LATEST_YML="dist/latest.yml"
+          if [ -f "$LATEST_YML" ]; then
+            SHA512=$(grep "^sha512:" "$LATEST_YML" | head -1 | awk '{print $2}')
+            FILE_SIZE=$(grep "size:" "$LATEST_YML" | head -1 | awk '{print $2}')
+          else
+            echo "Warning: latest.yml not found, using empty values"
+            SHA512=""
+            FILE_SIZE=0
+          fi
+
+          echo "SHA512: $SHA512"
+          echo "File size: $FILE_SIZE"
+
+          # Get release notes from GitHub API
+          RELEASE_NOTES=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${GITHUB_REF_NAME}" \
+            | jq -r '.body // "Actualización a la versión '"$VERSION"'."' \
+            | head -c 1000)
+
+          echo "Release notes: $RELEASE_NOTES"
+
+          # Call the webhook on celestepos.live
+          HTTP_STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://celestepos.live/api/desktop-release" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.DESKTOP_WEBHOOK_SECRET }}" \
+            -d "$(jq -n \
+              --arg version "$VERSION" \
+              --arg releaseDate "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+              --arg sha512 "$SHA512" \
+              --argjson fileSize "${FILE_SIZE:-0}" \
+              --arg releaseNotes "$RELEASE_NOTES" \
+              '{version: $version, releaseDate: $releaseDate, sha512: $sha512, fileSize: $fileSize, releaseNotes: $releaseNotes}')")
+
+          echo "Server response ($HTTP_STATUS):"
+          cat /tmp/response.json
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::warning::Server notification failed with status $HTTP_STATUS"
+          fi
