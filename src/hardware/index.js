@@ -11,6 +11,7 @@ let printerConfig = { type: 'usb', address: '', printerName: '' };
 let mainWindowRef = null;
 
 // ─── Known receipt printer name patterns ─────────────────────────────────────
+// First-tier: dedicated receipt/POS printers
 const RECEIPT_PRINTER_PATTERNS = [
   /80mm/i,
   /58mm/i,
@@ -29,6 +30,17 @@ const RECEIPT_PRINTER_PATTERNS = [
   /disashop/i,
   /escpos/i,
   /esc[\s\/]pos/i,
+];
+
+// Second-tier: Epson inkjet/all-in-one printers that can be used for receipts
+// (e.g., Epson ET-4550, EPSON88489C, Epson L-series, etc.)
+const EPSON_INKJET_PATTERNS = [
+  /epson\s*et[\s-]?\d/i,       // Epson ET-4550, ET-2720, etc.
+  /epson\s*l[\s-]?\d/i,        // Epson L3150, L4160, etc.
+  /epson\s*wf[\s-]?\d/i,       // Epson WF-2830, WF-7710, etc.
+  /epson\s*xp[\s-]?\d/i,       // Epson XP-4100, etc.
+  /epson\s*\d{4,}/i,           // EPSON88489C and similar model codes
+  /epson/i,                     // Any Epson printer as last resort
 ];
 
 // Printer names to exclude (regular document printers, fax, etc.)
@@ -106,7 +118,7 @@ async function getPrinterStatus() {
 
 // ─── Find Receipt Printer from System Printers ──────────────────────────────
 function findReceiptPrinter(printers) {
-  // First pass: look for known receipt printer patterns
+  // First pass: look for known receipt/thermal/POS printer patterns
   for (const p of printers) {
     if (EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) continue;
     if (RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name))) {
@@ -117,6 +129,15 @@ function findReceiptPrinter(printers) {
   // Second pass: look for USB Receipt Printer (generic name)
   for (const p of printers) {
     if (p.name.toLowerCase().includes('usb') && !EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) {
+      return p;
+    }
+  }
+
+  // Third pass: look for Epson inkjet/all-in-one printers (ET-4550, L-series, etc.)
+  // These can print receipts via the system printer dialog (not ESC/POS)
+  for (const p of printers) {
+    if (EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) continue;
+    if (EPSON_INKJET_PATTERNS.some(rx => rx.test(p.name))) {
       return p;
     }
   }
@@ -133,14 +154,16 @@ async function getAvailablePrinters() {
     try {
       const printers = mainWindowRef.webContents.getPrinters();
       for (const p of printers) {
-        const isReceipt = RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name));
         const isExcluded = EXCLUDED_PATTERNS.some(rx => rx.test(p.name));
+        const isReceiptDedicated = RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name));
+        const isEpsonInkjet = EPSON_INKJET_PATTERNS.some(rx => rx.test(p.name));
         result.push({
           name: p.name,
           displayName: p.displayName || p.name,
           status: p.status === 0 ? 'ready' : 'offline',
           isDefault: p.isDefault,
-          isReceipt: isReceipt && !isExcluded,
+          isReceipt: !isExcluded && (isReceiptDedicated || isEpsonInkjet),
+          isInkjet: isEpsonInkjet && !isReceiptDedicated,
           type: 'system',
         });
       }
