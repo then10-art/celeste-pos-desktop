@@ -51,7 +51,18 @@
 - [ ] Add desktop detection banner/badge in web app UI
 - [ ] Add printer settings page in web app (accessible from desktop menu)
 
-## Phase 6 — Offline Mode (Nice-to-Have)
+## Phase 6 — Tenant Setup & Independence
+- [x] One-time tenant code setup on first launch (setup.html + setup-preload.js)
+- [x] Persistent tenant config in electron-store (tenantSlug, tenantName, setupComplete)
+- [x] Remove business selection screen at startup — go directly to /t/{slug}
+- [x] Server-side tenant code validation via API
+- [x] Offline fallback — allow saving code without validation when no internet
+- [x] "Cambiar Negocio" option in menu and tray to reset tenant binding
+- [x] Tenant info injected into web app via __CELESTE_TENANT__ bridge
+- [x] Tenant info exposed via CelesteDesktop.getTenantInfo() IPC
+- [ ] Bundle frontend locally for full offline UI (Phase 2)
+
+## Phase 7 — Offline Mode (Nice-to-Have)
 - [ ] Offline product lookup by barcode (from local cache)
 - [ ] Offline customer lookup by cédula
 - [ ] Queue sale transactions when offline

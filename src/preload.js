@@ -110,7 +110,11 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   showOpenDialog: (options) =>
     ipcRenderer.invoke('show-open-dialog', options),
 
-  // ── Event Listeners ───────────────────────────────────────────────────────
+   // ── Tenant Info ───────────────────────────────────────────────────────
+  getTenantInfo: () =>
+    ipcRenderer.invoke('get-tenant-info'),
+
+  // ── Event Listeners ───────────────────────────────────────────────────
   onOnline: (callback) => {
     window.addEventListener('celeste-online', callback);
     return () => window.removeEventListener('celeste-online', callback);

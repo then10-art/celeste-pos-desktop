@@ -29,6 +29,8 @@ const UPDATE_SERVER = 'https://celestepos.live/updates/';
 const store = new Store({
   defaults: {
     tenantSlug: '',
+    tenantName: '',
+    setupComplete: false,
     windowBounds: { width: 1280, height: 800 },
     isMaximized: false,
     autoLaunch: false,
@@ -40,6 +42,7 @@ const store = new Store({
 
 // ─── Global State ─────────────────────────────────────────────────────────────
 let mainWindow = null;
+let setupWindow = null;
 let tray = null;
 let isOnline = true;
 let syncInterval = null;
@@ -50,6 +53,179 @@ let userTriggeredUpdateCheck = false;
 const { initDatabase, getOfflineQueue, clearSyncedItems } = require('./database');
 const { syncWithCloud } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters } = require('./hardware');
+
+// ─── Tenant Setup (First Launch) ─────────────────────────────────────────────
+function needsSetup() {
+  return !store.get('setupComplete') || !store.get('tenantSlug');
+}
+
+function createSetupWindow() {
+  setupWindow = new BrowserWindow({
+    width: 500,
+    height: 620,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    title: 'Celeste POS — Configuración Inicial',
+    icon: path.join(__dirname, '../assets/icon.ico'),
+    backgroundColor: '#f8f9fa',
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'setup-preload.js'),
+      webSecurity: true,
+      enableRemoteModule: false,
+    },
+  });
+
+  // No menu for setup window
+  setupWindow.setMenuBarVisibility(false);
+
+  // Load the local setup page
+  setupWindow.loadFile(path.join(__dirname, 'setup.html'));
+
+  // Inject version after load
+  setupWindow.webContents.on('did-finish-load', () => {
+    setupWindow.webContents.executeJavaScript(
+      `window.__CELESTE_VERSION__ = '${app.getVersion()}';
+       const vEl = document.getElementById('appVersion');
+       if (vEl) vEl.textContent = '${app.getVersion()}';`
+    ).catch(() => {});
+  });
+
+  setupWindow.once('ready-to-show', () => {
+    setupWindow.show();
+    setupWindow.focus();
+  });
+
+  setupWindow.on('closed', () => {
+    setupWindow = null;
+    // If setup wasn't completed, quit the app
+    if (needsSetup()) {
+      app.isQuitting = true;
+      app.quit();
+    }
+  });
+
+  return setupWindow;
+}
+
+// ─── IPC: Tenant Setup Validation ────────────────────────────────────────────
+ipcMain.handle('setup-validate-tenant', async (event, code) => {
+  const slug = code.trim().toLowerCase();
+
+  // Basic validation
+  if (!slug || slug.length < 2) {
+    return { success: false, error: 'El código debe tener al menos 2 caracteres.' };
+  }
+  if (!/^[a-z0-9_-]+$/.test(slug)) {
+    return { success: false, error: 'El código solo puede contener letras, números, guiones y guiones bajos.' };
+  }
+
+  // Validate against the server — check if the tenant exists
+  try {
+    const fetch = require('electron').net ? require('electron').net.fetch : global.fetch;
+    // Try to reach the tenant page to verify it exists
+    const response = await new Promise((resolve, reject) => {
+      const https = require('https');
+      const req = https.get(`${CLOUD_URL}/api/trpc/tenants.resolveSlug?input=${encodeURIComponent(JSON.stringify({ slug }))}`, {
+        timeout: 10000,
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => resolve({ status: res.statusCode, data }));
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    });
+
+    if (response.status === 200) {
+      // Parse the tRPC response — resolveSlug returns null for non-existent tenants
+      let tenantData = null;
+      try {
+        const parsed = JSON.parse(response.data);
+        tenantData = parsed.result?.data?.json || parsed.result?.data;
+      } catch { /* parse error */ }
+
+      // If tenant is null or inactive, the code doesn't exist
+      if (!tenantData || !tenantData.name) {
+        return { success: false, error: 'Código no encontrado. Verifique e intente de nuevo.' };
+      }
+
+      const tenantName = tenantData.name;
+
+      // Save the tenant code and mark setup as complete
+      store.set('tenantSlug', slug);
+      store.set('tenantName', tenantName);
+      store.set('setupComplete', true);
+
+      console.log(`[Setup] Tenant configured: ${slug} (${tenantName})`);
+
+      // Close setup window and launch main app
+      if (setupWindow) {
+        setupWindow.close();
+      }
+      launchMainApp();
+
+      return { success: true, tenantName };
+    } else {
+      return { success: false, error: 'Error del servidor. Intente de nuevo más tarde.' };
+    }
+  } catch (err) {
+    console.error('[Setup] Validation error:', err.message);
+
+    // If offline, allow saving the code without validation (trust the user)
+    const { response: offlineResponse } = await dialog.showMessageBox(setupWindow, {
+      type: 'warning',
+      title: 'Sin Conexión',
+      message: 'No se pudo verificar el código porque no hay conexión a internet.\n\n¿Desea guardar el código de todas formas?',
+      detail: `Código ingresado: ${slug.toUpperCase()}\n\nSi el código es incorrecto, podrá cambiarlo después.`,
+      buttons: ['Guardar de Todas Formas', 'Cancelar'],
+      defaultId: 0,
+    });
+
+    if (offlineResponse === 0) {
+      store.set('tenantSlug', slug);
+      store.set('tenantName', slug.toUpperCase());
+      store.set('setupComplete', true);
+
+      console.log(`[Setup] Tenant configured (offline): ${slug}`);
+
+      if (setupWindow) {
+        setupWindow.close();
+      }
+      launchMainApp();
+
+      return { success: true, tenantName: slug.toUpperCase() };
+    }
+
+    return { success: false, error: 'Operación cancelada.' };
+  }
+});
+
+// ─── Main App Launch ─────────────────────────────────────────────────────────
+async function launchMainApp() {
+  // Create main window
+  createWindow();
+
+  // Setup hardware with mainWindow reference for system printer access
+  await setupHardware(store.get('printerConfig'), mainWindow);
+
+  // Create system tray
+  createTray();
+
+  // Start connectivity monitoring
+  startConnectivityMonitor();
+
+  // Setup auto-updater event listeners
+  setupAutoUpdater();
+
+  // Check for updates on startup (after 10 seconds, silent)
+  if (!isDev) {
+    setTimeout(() => checkForUpdates(false), 10000);
+  }
+}
 
 // ─── Window Creation ──────────────────────────────────────────────────────────
 function createWindow() {
@@ -79,12 +255,11 @@ function createWindow() {
   // Remove default menu bar
   Menu.setApplicationMenu(buildAppMenu());
 
-  // Load the web app
+  // Load the web app — always go directly to the tenant URL (no business selection)
   const tenantSlug = store.get('tenantSlug');
-  const url = tenantSlug
-    ? `${CLOUD_URL}/t/${tenantSlug}`
-    : `${CLOUD_URL}/t`;
+  const url = `${CLOUD_URL}/t/${tenantSlug}`;
 
+  console.log(`[App] Loading tenant: ${tenantSlug} → ${url}`);
   mainWindow.loadURL(url);
 
   // Show window when ready
@@ -138,9 +313,11 @@ function createTray() {
   const iconPath = path.join(__dirname, '../assets/tray-icon.ico');
   tray = new Tray(iconPath);
 
+  const tenantName = store.get('tenantName') || store.get('tenantSlug') || 'Celeste POS';
+
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: 'Abrir Celeste POS',
+      label: `Abrir ${tenantName}`,
       click: () => {
         mainWindow.show();
         mainWindow.focus();
@@ -151,13 +328,21 @@ function createTray() {
       label: isOnline ? '🟢 En línea' : '🔴 Sin conexión',
       enabled: false,
     },
+    {
+      label: `Negocio: ${store.get('tenantSlug', '').toUpperCase()}`,
+      enabled: false,
+    },
     { type: 'separator' },
     {
       label: 'Configuración',
       click: () => {
         mainWindow.show();
-        mainWindow.loadURL(`${CLOUD_URL}/settings`);
+        mainWindow.loadURL(`${CLOUD_URL}/t/${store.get('tenantSlug')}/settings`);
       }
+    },
+    {
+      label: 'Cambiar Negocio',
+      click: () => resetTenantSetup()
     },
     {
       label: 'Verificar Actualizaciones',
@@ -173,7 +358,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('Celeste POS');
+  tray.setToolTip(`Celeste POS — ${tenantName}`);
   tray.setContextMenu(contextMenu);
 
   tray.on('double-click', () => {
@@ -182,8 +367,33 @@ function createTray() {
   });
 }
 
+// ─── Reset Tenant (Change Business) ──────────────────────────────────────────
+async function resetTenantSetup() {
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: 'Cambiar Negocio',
+    message: '¿Está seguro que desea desvincular esta terminal del negocio actual?',
+    detail: `Negocio actual: ${store.get('tenantName') || store.get('tenantSlug')}\n\nLa aplicación se reiniciará y deberá ingresar un nuevo código de negocio.`,
+    buttons: ['Cambiar Negocio', 'Cancelar'],
+    defaultId: 1,
+    cancelId: 1,
+  });
+
+  if (response === 0) {
+    store.set('tenantSlug', '');
+    store.set('tenantName', '');
+    store.set('setupComplete', false);
+
+    // Relaunch the app
+    app.relaunch();
+    app.isQuitting = true;
+    app.quit();
+  }
+}
+
 // ─── App Menu ─────────────────────────────────────────────────────────────────
 function buildAppMenu() {
+  const tenantSlug = store.get('tenantSlug') || '';
   return Menu.buildFromTemplate([
     {
       label: 'Archivo',
@@ -197,6 +407,11 @@ function buildAppMenu() {
           label: 'Pantalla Completa',
           accelerator: 'F11',
           click: () => mainWindow.setFullScreen(!mainWindow.isFullScreen())
+        },
+        { type: 'separator' },
+        {
+          label: 'Cambiar Negocio',
+          click: () => resetTenantSetup()
         },
         { type: 'separator' },
         {
@@ -290,10 +505,14 @@ function injectOfflineIndicator() {
 // ─── Desktop Bridge Injection ─────────────────────────────────────────────────
 function injectDesktopBridge() {
   // Inject a flag so the web app knows it's running in desktop mode
+  const tenantSlug = store.get('tenantSlug') || '';
+  const tenantName = store.get('tenantName') || '';
   const script = `
     window.__CELESTE_DESKTOP__ = true;
     window.__CELESTE_VERSION__ = '${app.getVersion()}';
-    console.log('[Celeste POS Desktop] Running in desktop mode v${app.getVersion()}');
+    window.__CELESTE_TENANT__ = '${tenantSlug}';
+    window.__CELESTE_TENANT_NAME__ = '${tenantName}';
+    console.log('[Celeste POS Desktop] Running in desktop mode v${app.getVersion()} — Tenant: ${tenantSlug}');
   `;
   mainWindow.webContents.executeJavaScript(script).catch(() => {});
 }
@@ -544,6 +763,15 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
   return await dialog.showOpenDialog(mainWindow, options);
 });
 
+// ─── IPC: Get tenant info ────────────────────────────────────────────────────
+ipcMain.handle('get-tenant-info', () => {
+  return {
+    slug: store.get('tenantSlug'),
+    name: store.get('tenantName'),
+    setupComplete: store.get('setupComplete'),
+  };
+});
+
 // ─── Helper Dialogs ───────────────────────────────────────────────────────────
 async function openPrinterConfig() {
   mainWindow.show();
@@ -636,11 +864,14 @@ async function showConnectedDevices() {
 }
 
 function showAbout() {
+  const tenantInfo = store.get('tenantSlug')
+    ? `\nNegocio: ${store.get('tenantName') || store.get('tenantSlug')}`
+    : '';
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: 'Acerca de Celeste POS',
     message: 'Celeste POS',
-    detail: `Versión: ${app.getVersion()}\nPlataforma: ${process.platform} ${process.arch}\nElectron: ${process.versions.electron}\nNode.js: ${process.versions.node}\n\n© 2024 Celeste POS. Todos los derechos reservados.`,
+    detail: `Versión: ${app.getVersion()}\nPlataforma: ${process.platform} ${process.arch}\nElectron: ${process.versions.electron}\nNode.js: ${process.versions.node}${tenantInfo}\n\n© 2024 Celeste POS. Todos los derechos reservados.`,
     icon: path.join(__dirname, '../assets/icon.ico'),
   });
 }
@@ -650,24 +881,14 @@ app.whenReady().then(async () => {
   // Initialize local database
   await initDatabase();
 
-  // Create main window first (needed for printer detection via webContents.getPrinters())
-  createWindow();
-
-  // Setup hardware with mainWindow reference for system printer access
-  await setupHardware(store.get('printerConfig'), mainWindow);
-
-  // Create system tray
-  createTray();
-
-  // Start connectivity monitoring
-  startConnectivityMonitor();
-
-  // Setup auto-updater event listeners
-  setupAutoUpdater();
-
-  // Check for updates on startup (after 10 seconds, silent - no dialog if no update or error)
-  if (!isDev) {
-    setTimeout(() => checkForUpdates(false), 10000);
+  if (needsSetup()) {
+    // First launch — show tenant setup screen
+    console.log('[App] First launch detected — showing setup screen');
+    createSetupWindow();
+  } else {
+    // Normal launch — go directly to the tenant app
+    console.log(`[App] Launching for tenant: ${store.get('tenantSlug')}`);
+    await launchMainApp();
   }
 });
 
@@ -697,6 +918,9 @@ if (!gotTheLock) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
+    } else if (setupWindow) {
+      setupWindow.show();
+      setupWindow.focus();
     }
   });
 }
