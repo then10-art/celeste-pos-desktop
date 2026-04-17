@@ -1,6 +1,6 @@
 {
   "name": "celeste-pos-desktop",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Celeste POS - Desktop Application for Windows",
   "main": "src/main.js",
   "author": "Celeste POS",
@@ -79,12 +79,20 @@
     "files": [
       "src/**/*",
       "assets/**/*",
+      "webapp/**/*",
       "!node_modules/.cache"
     ],
     "extraResources": [
       {
         "from": "assets",
         "to": "assets",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "webapp",
+        "to": "webapp",
         "filter": [
           "**/*"
         ]

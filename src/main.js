@@ -53,6 +53,11 @@ let userTriggeredUpdateCheck = false;
 const { initDatabase, getOfflineQueue, clearSyncedItems } = require('./database');
 const { syncWithCloud } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters } = require('./hardware');
+const { startLocalServer } = require('./local-server');
+
+// ─── Local Server State ──────────────────────────────────────────────────────
+let localServerPort = null;
+let localServerInstance = null;
 
 // ─── Tenant Setup (First Launch) ─────────────────────────────────────────────
 function needsSetup() {
@@ -206,6 +211,20 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
 
 // ─── Main App Launch ─────────────────────────────────────────────────────────
 async function launchMainApp() {
+  // Start local server for bundled frontend
+  try {
+    const result = await startLocalServer();
+    if (result) {
+      localServerPort = result.port;
+      localServerInstance = result.server;
+      console.log(`[App] Local server started on port ${localServerPort}`);
+    } else {
+      console.log('[App] No local webapp found — using cloud URL');
+    }
+  } catch (err) {
+    console.error('[App] Failed to start local server:', err.message);
+  }
+
   // Create main window
   createWindow();
 
@@ -255,11 +274,16 @@ function createWindow() {
   // Remove default menu bar
   Menu.setApplicationMenu(buildAppMenu());
 
-  // Load the web app — always go directly to the tenant URL (no business selection)
+  // Load the web app — use local server if available, otherwise cloud
   const tenantSlug = store.get('tenantSlug');
-  const url = `${CLOUD_URL}/t/${tenantSlug}`;
-
-  console.log(`[App] Loading tenant: ${tenantSlug} → ${url}`);
+  let url;
+  if (localServerPort) {
+    url = `http://127.0.0.1:${localServerPort}/t/${tenantSlug}`;
+    console.log(`[App] Loading tenant locally: ${tenantSlug} → ${url}`);
+  } else {
+    url = `${CLOUD_URL}/t/${tenantSlug}`;
+    console.log(`[App] Loading tenant from cloud: ${tenantSlug} → ${url}`);
+  }
   mainWindow.loadURL(url);
 
   // Show window when ready
@@ -285,11 +309,13 @@ function createWindow() {
     }
   });
 
-  // Handle navigation - stay within celestepos.live
-  mainWindow.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith(CLOUD_URL) && !url.startsWith('https://celestepos.live')) {
+  // Handle navigation - stay within celestepos.live or local server
+  mainWindow.webContents.on('will-navigate', (e, navUrl) => {
+    const isLocal = localServerPort && navUrl.startsWith(`http://127.0.0.1:${localServerPort}`);
+    const isCloud = navUrl.startsWith(CLOUD_URL) || navUrl.startsWith('https://celestepos.live');
+    if (!isLocal && !isCloud) {
       e.preventDefault();
-      shell.openExternal(url);
+      shell.openExternal(navUrl);
     }
   });
 
@@ -337,7 +363,8 @@ function createTray() {
       label: 'Configuración',
       click: () => {
         mainWindow.show();
-        mainWindow.loadURL(`${CLOUD_URL}/t/${store.get('tenantSlug')}/settings`);
+        const base = localServerPort ? `http://127.0.0.1:${localServerPort}` : CLOUD_URL;
+        mainWindow.loadURL(`${base}/t/${store.get('tenantSlug')}/settings`);
       }
     },
     {
