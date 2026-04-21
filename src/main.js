@@ -23,7 +23,7 @@ try {
 // ─── App Configuration ───────────────────────────────────────────────────────
 const isDev = process.argv.includes('--dev');
 const CLOUD_URL = 'https://celestepos.live';
-const UPDATE_SERVER = 'https://celestepos.live/updates/';
+const UPDATE_SERVER = 'https://celestepos.live/api/updates/';
 
 // ─── Persistent Settings Store ───────────────────────────────────────────────
 const store = new Store({

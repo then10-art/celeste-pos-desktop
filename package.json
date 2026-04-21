@@ -1,6 +1,6 @@
 {
   "name": "celeste-pos-desktop",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Celeste POS - Desktop Application for Windows",
   "main": "src/main.js",
   "author": "Celeste POS",
@@ -100,7 +100,7 @@
     ],
     "publish": {
       "provider": "generic",
-      "url": "https://celestepos.live/updates/"
+      "url": "https://celestepos.live/api/updates/"
     }
   }
 }
