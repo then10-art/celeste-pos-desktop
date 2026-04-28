@@ -134,7 +134,7 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
     // Try to reach the tenant page to verify it exists
     const response = await new Promise((resolve, reject) => {
       const https = require('https');
-      const req = https.get(`${CLOUD_URL}/api/trpc/tenants.resolveSlug?input=${encodeURIComponent(JSON.stringify({ slug }))}`, {
+      const req = https.get(`${CLOUD_URL}/api/trpc/tenants.resolveSlug?input=${encodeURIComponent(JSON.stringify({ json: { slug } }))}`, {
         timeout: 10000,
       }, (res) => {
         let data = '';

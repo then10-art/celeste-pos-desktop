@@ -21,11 +21,11 @@ async function syncWithCloud(queue) {
           'Content-Type': 'application/json',
           'X-Celeste-Desktop': '1',
         },
-        body: JSON.stringify({
+        body: JSON.stringify({ json: {
           type: item.type,
           payload: item.payload,
           queuedAt: item.created_at,
-        }),
+        } }),
         signal: AbortSignal.timeout(10000),
       });
 
@@ -50,7 +50,7 @@ async function syncWithCloud(queue) {
 async function fetchProductsForCache(tenantId, authToken) {
   try {
     const response = await fetch(
-      `${CLOUD_URL}/api/trpc/products.listForCache?input=${encodeURIComponent(JSON.stringify({ tenantId }))}`,
+      `${CLOUD_URL}/api/trpc/products.listForCache?input=${encodeURIComponent(JSON.stringify({ json: { tenantId } }))}`,
       {
         headers: {
           'Cookie': authToken,
@@ -62,7 +62,7 @@ async function fetchProductsForCache(tenantId, authToken) {
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    return data?.result?.data ?? [];
+    return data?.result?.data?.json ?? data?.result?.data ?? [];
   } catch (err) {
     console.error('[Sync] Failed to fetch products for cache:', err.message);
     return [];
@@ -77,7 +77,7 @@ async function fetchProductsForCache(tenantId, authToken) {
 async function fetchCustomersForCache(tenantId, authToken) {
   try {
     const response = await fetch(
-      `${CLOUD_URL}/api/trpc/customers.listForCache?input=${encodeURIComponent(JSON.stringify({ tenantId }))}`,
+      `${CLOUD_URL}/api/trpc/customers.listForCache?input=${encodeURIComponent(JSON.stringify({ json: { tenantId } }))}`,
       {
         headers: {
           'Cookie': authToken,
@@ -89,7 +89,7 @@ async function fetchCustomersForCache(tenantId, authToken) {
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    return data?.result?.data ?? [];
+    return data?.result?.data?.json ?? data?.result?.data ?? [];
   } catch (err) {
     console.error('[Sync] Failed to fetch customers for cache:', err.message);
     return [];
