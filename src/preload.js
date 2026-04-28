@@ -91,8 +91,17 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   getQueuedCount: () =>
     ipcRenderer.invoke('get-queued-count'),
 
+  getQueueStats: () =>
+    ipcRenderer.invoke('get-queue-stats'),
+
   queueOfflineTransaction: (transaction) =>
     ipcRenderer.invoke('queue-offline-transaction', transaction),
+
+  retryFailedItems: () =>
+    ipcRenderer.invoke('retry-failed-items'),
+
+  forceSync: () =>
+    ipcRenderer.invoke('force-sync'),
 
   onSyncComplete: (callback) => {
     syncListeners.push(callback);

@@ -46,12 +46,15 @@ let setupWindow = null;
 let tray = null;
 let isOnline = true;
 let syncInterval = null;
+let isSyncing = false; // Prevent concurrent sync runs
+let consecutiveFailures = 0; // Track consecutive connectivity failures for adaptive polling
+let retryTimerId = null; // Timer for scheduled retries
 // Track whether the user manually triggered the update check (for error dialog)
 let userTriggeredUpdateCheck = false;
 
 // ─── Sync & Offline Modules ───────────────────────────────────────────────────
-const { initDatabase, getOfflineQueue, clearSyncedItems } = require('./database');
-const { syncWithCloud } = require('./sync');
+const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getRetryableItems, getQueueStats, retryFailedItems, purgeOldSyncedItems } = require('./database');
+const { syncWithCloud, checkCloudHealth } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters } = require('./hardware');
 const { startLocalServer } = require('./local-server');
 
@@ -511,9 +514,32 @@ function injectOfflineIndicator() {
         font-family: system-ui, sans-serif;
         font-weight: 500;
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        transition: background-color 0.3s ease;
       \`;
-      banner.innerHTML = '⚠️ Sin conexión a internet — Las transacciones se guardarán localmente y se sincronizarán cuando se restaure la conexión.';
+      banner.innerHTML = '\u26a0\ufe0f Sin conexi\u00f3n a internet \u2014 Las transacciones se guardar\u00e1n localmente y se sincronizar\u00e1n cuando se restaure la conexi\u00f3n.';
       document.body.prepend(banner);
+
+      // Create syncing banner (green, shows during active sync)
+      const syncBanner = document.createElement('div');
+      syncBanner.id = 'celeste-sync-banner';
+      syncBanner.style.cssText = \`
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 99998;
+        background: #22c55e;
+        color: white;
+        text-align: center;
+        padding: 6px 12px;
+        font-size: 13px;
+        font-family: system-ui, sans-serif;
+        font-weight: 500;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        transition: opacity 0.5s ease;
+      \`;
+      document.body.prepend(syncBanner);
 
       // Listen for offline status from main process
       window.addEventListener('celeste-offline', () => {
@@ -522,8 +548,62 @@ function injectOfflineIndicator() {
       });
       window.addEventListener('celeste-online', () => {
         banner.style.display = 'none';
-        document.body.style.paddingTop = '';
+        document.body.style.paddingTop = syncBanner.style.display === 'block' ? '34px' : '';
       });
+
+      // Listen for sync events
+      window.addEventListener('celeste-sync-start', () => {
+        syncBanner.innerHTML = '\ud83d\udd04 Sincronizando transacciones pendientes...';
+        syncBanner.style.display = 'block';
+        if (banner.style.display !== 'block') {
+          document.body.style.paddingTop = '34px';
+        }
+      });
+      window.addEventListener('celeste-sync-complete', (e) => {
+        const detail = e.detail || {};
+        if (detail.synced > 0) {
+          syncBanner.innerHTML = '\u2705 ' + detail.synced + ' transaccion' + (detail.synced === 1 ? '' : 'es') + ' sincronizada' + (detail.synced === 1 ? '' : 's');
+          syncBanner.style.background = '#22c55e';
+        } else {
+          syncBanner.style.display = 'none';
+          if (banner.style.display !== 'block') document.body.style.paddingTop = '';
+          return;
+        }
+        // Auto-hide after 3 seconds
+        setTimeout(() => {
+          syncBanner.style.display = 'none';
+          if (banner.style.display !== 'block') document.body.style.paddingTop = '';
+        }, 3000);
+      });
+
+      // Toast helper for sync notifications
+      window.__celesteShowToast = window.__celesteShowToast || function(msg, type) {
+        const toast = document.createElement('div');
+        toast.style.cssText = \`
+          position: fixed;
+          bottom: 20px;
+          right: 20px;
+          z-index: 99999;
+          padding: 12px 20px;
+          border-radius: 8px;
+          font-size: 14px;
+          font-family: system-ui, sans-serif;
+          font-weight: 500;
+          color: white;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+          opacity: 0;
+          transition: opacity 0.3s ease;
+          max-width: 400px;
+        \`;
+        toast.style.background = type === 'success' ? '#22c55e' : type === 'error' ? '#ef4444' : '#3b82f6';
+        toast.textContent = msg;
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => { toast.style.opacity = '1'; });
+        setTimeout(() => {
+          toast.style.opacity = '0';
+          setTimeout(() => toast.remove(), 300);
+        }, 4000);
+      };
     })();
   `;
   mainWindow.webContents.executeJavaScript(script).catch(() => {});
@@ -544,62 +624,185 @@ function injectDesktopBridge() {
   mainWindow.webContents.executeJavaScript(script).catch(() => {});
 }
 
-// ─── Connectivity Monitoring ──────────────────────────────────────────────────
+// ─── Connectivity Monitoring (Adaptive Polling) ─────────────────────────────
 function startConnectivityMonitor() {
-  const checkInterval = 10000; // 10 seconds
+  const BASE_INTERVAL = 10000;  // 10 seconds when online
+  const MAX_INTERVAL = 120000;  // 2 minutes max when offline
 
-  setInterval(async () => {
+  async function checkConnectivity() {
     try {
-      const response = await fetch(`${CLOUD_URL}/api/health`, {
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000)
-      });
+      const healthy = await checkCloudHealth(5000);
       const wasOffline = !isOnline;
-      isOnline = response.ok;
+      isOnline = healthy;
 
-      if (wasOffline && isOnline) {
-        // Just came back online - trigger sync
-        mainWindow?.webContents.executeJavaScript(
-          "window.dispatchEvent(new Event('celeste-online'));"
-        ).catch(() => {});
-        syncOfflineQueue();
+      if (healthy) {
+        consecutiveFailures = 0;
+
+        if (wasOffline) {
+          console.log('[Connectivity] Connection restored!');
+          mainWindow?.webContents.executeJavaScript(
+            "window.dispatchEvent(new Event('celeste-online'));"
+          ).catch(() => {});
+          updateOfflineBanner();
+          // Trigger sync immediately when coming back online
+          syncOfflineQueue();
+        }
       }
     } catch {
+      consecutiveFailures++;
       if (isOnline) {
         isOnline = false;
+        console.log('[Connectivity] Connection lost');
         mainWindow?.webContents.executeJavaScript(
           "window.dispatchEvent(new Event('celeste-offline'));"
         ).catch(() => {});
+        updateOfflineBanner();
       }
     }
-  }, checkInterval);
+
+    // Adaptive polling: back off when offline, speed up when online
+    const nextInterval = isOnline
+      ? BASE_INTERVAL
+      : Math.min(BASE_INTERVAL * Math.pow(1.5, consecutiveFailures), MAX_INTERVAL);
+
+    setTimeout(checkConnectivity, nextInterval);
+  }
+
+  // Start the first check
+  setTimeout(checkConnectivity, BASE_INTERVAL);
+
+  // Also start the retry timer for queued items
+  startRetryTimer();
+
+  // Purge old synced items on startup
+  purgeOldSyncedItems();
 }
 
-// ─── Offline Queue Sync ───────────────────────────────────────────────────────
+/**
+ * Periodically check for items ready to retry (based on their next_retry time)
+ */
+function startRetryTimer() {
+  retryTimerId = setInterval(() => {
+    if (isOnline && !isSyncing) {
+      const retryable = getRetryableItems();
+      if (retryable.length > 0) {
+        console.log(`[Retry] Found ${retryable.length} items ready for retry`);
+        syncOfflineQueue();
+      }
+    }
+  }, 15000); // Check every 15 seconds
+}
+
+/**
+ * Update the offline banner with pending sync count
+ */
+function updateOfflineBanner() {
+  const stats = getQueueStats();
+  const pendingCount = stats.pending + stats.retrying;
+
+  if (!isOnline && pendingCount > 0) {
+    mainWindow?.webContents.executeJavaScript(`
+      (function() {
+        const banner = document.getElementById('celeste-offline-banner');
+        if (banner) {
+          banner.innerHTML = '⚠️ Sin conexión — ${pendingCount} transaccion${pendingCount === 1 ? '' : 'es'} pendiente${pendingCount === 1 ? '' : 's'} de sincronizar';
+          banner.style.display = 'block';
+          document.body.style.paddingTop = '34px';
+        }
+      })();
+    `).catch(() => {});
+  } else if (!isOnline) {
+    mainWindow?.webContents.executeJavaScript(`
+      (function() {
+        const banner = document.getElementById('celeste-offline-banner');
+        if (banner) {
+          banner.innerHTML = '⚠️ Sin conexión a internet — Las transacciones se guardarán localmente y se sincronizarán cuando se restaure la conexión.';
+          banner.style.display = 'block';
+          document.body.style.paddingTop = '34px';
+        }
+      })();
+    `).catch(() => {});
+  }
+}
+
+// ─── Offline Queue Sync (Resilient) ──────────────────────────────────────────
 async function syncOfflineQueue() {
+  // Prevent concurrent sync runs
+  if (isSyncing) {
+    console.log('[Sync] Already syncing, skipping...');
+    return;
+  }
+
+  isSyncing = true;
   try {
-    const queue = getOfflineQueue();
-    if (queue.length === 0) return;
+    // Use getRetryableItems which respects backoff timers
+    const queue = getRetryableItems();
+    if (queue.length === 0) {
+      isSyncing = false;
+      return;
+    }
 
     console.log(`[Sync] Syncing ${queue.length} offline transactions...`);
-    const synced = await syncWithCloud(queue);
-    clearSyncedItems(synced);
-    console.log(`[Sync] Successfully synced ${synced.length} items`);
 
-    // Notify the renderer about sync completion via IPC
-    const remaining = getOfflineQueue().length;
-    mainWindow?.webContents.send('sync-complete', {
-      queued: remaining,
-      synced: synced.length,
+    // Notify renderer that sync is starting
+    mainWindow?.webContents.executeJavaScript(
+      `window.dispatchEvent(new Event('celeste-sync-start'));`
+    ).catch(() => {});
+
+    const result = await syncWithCloud(queue, {
+      onItemSynced: (id) => {
+        console.log(`[Sync] Item ${id} synced successfully`);
+      },
+      onItemFailed: (id, error) => {
+        console.warn(`[Sync] Item ${id} failed: ${error}`);
+        recordSyncFailure(id, error);
+      },
     });
 
+    // Clear successfully synced items
+    if (result.synced.length > 0) {
+      clearSyncedItems(result.synced);
+    }
+
+    const stats = getQueueStats();
+    console.log(`[Sync] Result: ${result.synced.length} synced, ${result.failed.length} failed | Queue: ${stats.pending} pending, ${stats.retrying} retrying, ${stats.failed} permanently failed`);
+
+    // Notify the renderer about sync completion
+    mainWindow?.webContents.send('sync-complete', {
+      synced: result.synced.length,
+      failed: result.failed.length,
+      queued: stats.pending + stats.retrying,
+      permanentlyFailed: stats.failed,
+    });
+
+    // Show toast notifications
+    if (result.synced.length > 0) {
+      mainWindow?.webContents.executeJavaScript(`
+        if (window.__celesteShowToast) {
+          window.__celesteShowToast('${result.synced.length} transaccion${result.synced.length === 1 ? '' : 'es'} sincronizada${result.synced.length === 1 ? '' : 's'} con la nube', 'success');
+        }
+      `).catch(() => {});
+    }
+
+    if (result.failed.length > 0 && stats.failed > 0) {
+      mainWindow?.webContents.executeJavaScript(`
+        if (window.__celesteShowToast) {
+          window.__celesteShowToast('${stats.failed} transaccion${stats.failed === 1 ? '' : 'es'} no se pudieron sincronizar despu\u00e9s de m\u00faltiples intentos', 'error');
+        }
+      `).catch(() => {});
+    }
+
+    // Notify renderer that sync is complete
     mainWindow?.webContents.executeJavaScript(`
-      if (window.__celesteShowToast) {
-        window.__celesteShowToast('${synced.length} transacciones sincronizadas con la nube', 'success');
-      }
+      window.dispatchEvent(new CustomEvent('celeste-sync-complete', { detail: { synced: ${result.synced.length}, failed: ${result.failed.length} } }));
     `).catch(() => {});
+
+    // Update the offline banner with current count
+    updateOfflineBanner();
   } catch (err) {
     console.error('[Sync] Error syncing offline queue:', err);
+  } finally {
+    isSyncing = false;
   }
 }
 
@@ -769,17 +972,46 @@ ipcMain.handle('save-settings', (event, settings) => {
 });
 
 ipcMain.handle('get-offline-status', () => {
-  return { isOnline, queueLength: getOfflineQueue().length };
+  const stats = getQueueStats();
+  return {
+    isOnline,
+    isSyncing,
+    queueLength: stats.pending + stats.retrying,
+    stats,
+  };
 });
 
 ipcMain.handle('get-queued-count', () => {
-  return getOfflineQueue().length;
+  const stats = getQueueStats();
+  return stats.pending + stats.retrying;
+});
+
+ipcMain.handle('get-queue-stats', () => {
+  return getQueueStats();
 });
 
 ipcMain.handle('queue-offline-transaction', (event, transaction) => {
   const { queueTransaction } = require('./database');
-  queueTransaction(transaction);
-  return true;
+  const result = queueTransaction(transaction);
+  // Update the banner immediately to reflect the new item
+  updateOfflineBanner();
+  return result;
+});
+
+ipcMain.handle('retry-failed-items', () => {
+  const count = retryFailedItems();
+  if (count > 0) {
+    console.log(`[Sync] Reset ${count} failed items for retry`);
+    syncOfflineQueue(); // Trigger immediate sync
+  }
+  return count;
+});
+
+ipcMain.handle('force-sync', async () => {
+  if (!isOnline) return { success: false, reason: 'offline' };
+  if (isSyncing) return { success: false, reason: 'already_syncing' };
+  await syncOfflineQueue();
+  return { success: true, stats: getQueueStats() };
 });
 
 ipcMain.handle('show-save-dialog', async (event, options) => {

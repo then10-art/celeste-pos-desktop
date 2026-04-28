@@ -29,7 +29,11 @@ async function initDatabase() {
         payload     TEXT NOT NULL,
         created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
         synced      INTEGER NOT NULL DEFAULT 0,
-        error       TEXT
+        error       TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        last_retry  INTEGER,
+        next_retry  INTEGER,
+        status      TEXT NOT NULL DEFAULT 'pending'
       );
 
       -- Local cache for products (for offline barcode lookup)
@@ -119,9 +123,148 @@ function clearSyncedItems(syncedIds) {
   if (!db || !syncedIds.length) return;
   try {
     const placeholders = syncedIds.map(() => '?').join(',');
-    db.prepare(`UPDATE offline_queue SET synced = 1 WHERE id IN (${placeholders})`).run(...syncedIds);
+    db.prepare(`UPDATE offline_queue SET synced = 1, status = 'synced' WHERE id IN (${placeholders})`).run(...syncedIds);
   } catch (err) {
     console.error('[DB] Failed to clear synced items:', err);
+  }
+}
+
+/**
+ * Record a failed sync attempt with exponential backoff scheduling
+ * Base delay: 5s, max delay: 5 minutes, max retries: 10
+ */
+function recordSyncFailure(itemId, errorMessage) {
+  if (!db) return;
+  try {
+    const item = db.prepare('SELECT retry_count FROM offline_queue WHERE id = ?').get(itemId);
+    if (!item) return;
+
+    const retryCount = (item.retry_count || 0) + 1;
+    const MAX_RETRIES = 10;
+    const BASE_DELAY = 5000; // 5 seconds
+    const MAX_DELAY = 300000; // 5 minutes
+
+    if (retryCount >= MAX_RETRIES) {
+      // Mark as permanently failed
+      db.prepare(`
+        UPDATE offline_queue
+        SET retry_count = ?, error = ?, status = 'failed', last_retry = ?
+        WHERE id = ?
+      `).run(retryCount, errorMessage, Date.now(), itemId);
+      console.warn(`[DB] Item ${itemId} permanently failed after ${MAX_RETRIES} retries: ${errorMessage}`);
+    } else {
+      // Schedule next retry with exponential backoff + jitter
+      const delay = Math.min(BASE_DELAY * Math.pow(2, retryCount - 1), MAX_DELAY);
+      const jitter = Math.random() * delay * 0.3; // 30% jitter
+      const nextRetry = Date.now() + delay + jitter;
+
+      db.prepare(`
+        UPDATE offline_queue
+        SET retry_count = ?, error = ?, last_retry = ?, next_retry = ?, status = 'retrying'
+        WHERE id = ?
+      `).run(retryCount, errorMessage, Date.now(), Math.round(nextRetry), itemId);
+      console.log(`[DB] Item ${itemId} retry ${retryCount}/${MAX_RETRIES}, next in ${Math.round((delay + jitter) / 1000)}s`);
+    }
+  } catch (err) {
+    console.error('[DB] Failed to record sync failure:', err);
+  }
+}
+
+/**
+ * Get items that are ready for retry (next_retry time has passed)
+ */
+function getRetryableItems() {
+  if (!db) return [];
+  try {
+    return db.prepare(`
+      SELECT * FROM offline_queue
+      WHERE synced = 0
+        AND status IN ('pending', 'retrying')
+        AND (next_retry IS NULL OR next_retry <= ?)
+      ORDER BY created_at ASC
+      LIMIT 50
+    `).all(Date.now()).map(row => ({
+      ...row,
+      payload: JSON.parse(row.payload)
+    }));
+  } catch (err) {
+    console.error('[DB] Failed to get retryable items:', err);
+    return [];
+  }
+}
+
+/**
+ * Get queue statistics for UI display
+ */
+function getQueueStats() {
+  if (!db) return { pending: 0, retrying: 0, failed: 0, synced: 0, total: 0, oldestPending: null };
+  try {
+    const stats = db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' AND synced = 0 THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'retrying' AND synced = 0 THEN 1 ELSE 0 END) as retrying,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+        SUM(CASE WHEN synced = 1 THEN 1 ELSE 0 END) as synced,
+        COUNT(*) as total
+      FROM offline_queue
+    `).get();
+
+    const oldest = db.prepare(`
+      SELECT MIN(created_at) as oldest
+      FROM offline_queue
+      WHERE synced = 0 AND status IN ('pending', 'retrying')
+    `).get();
+
+    return {
+      pending: stats.pending || 0,
+      retrying: stats.retrying || 0,
+      failed: stats.failed || 0,
+      synced: stats.synced || 0,
+      total: stats.total || 0,
+      oldestPending: oldest?.oldest || null,
+    };
+  } catch (err) {
+    console.error('[DB] Failed to get queue stats:', err);
+    return { pending: 0, retrying: 0, failed: 0, synced: 0, total: 0, oldestPending: null };
+  }
+}
+
+/**
+ * Retry permanently failed items (admin action)
+ */
+function retryFailedItems() {
+  if (!db) return 0;
+  try {
+    const result = db.prepare(`
+      UPDATE offline_queue
+      SET status = 'pending', retry_count = 0, error = NULL, next_retry = NULL
+      WHERE status = 'failed'
+    `).run();
+    return result.changes;
+  } catch (err) {
+    console.error('[DB] Failed to retry failed items:', err);
+    return 0;
+  }
+}
+
+/**
+ * Purge old synced items (keep last 7 days)
+ */
+function purgeOldSyncedItems() {
+  if (!db) return 0;
+  try {
+    const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const result = db.prepare(`
+      DELETE FROM offline_queue
+      WHERE synced = 1 AND created_at < ?
+    `).run(cutoff);
+    if (result.changes > 0) {
+      console.log(`[DB] Purged ${result.changes} old synced items`);
+    }
+    return result.changes;
+  } catch (err) {
+    console.error('[DB] Failed to purge old items:', err);
+    return 0;
   }
 }
 
@@ -226,6 +369,11 @@ module.exports = {
   queueTransaction,
   getOfflineQueue,
   clearSyncedItems,
+  recordSyncFailure,
+  getRetryableItems,
+  getQueueStats,
+  retryFailedItems,
+  purgeOldSyncedItems,
   cacheProducts,
   lookupProductByBarcode,
   cacheCustomers,
