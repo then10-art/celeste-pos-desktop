@@ -68,6 +68,7 @@ function getWebappDir() {
  */
 function proxyToCloud(req, res) {
   const targetUrl = `${CLOUD_URL}${req.url}`;
+  const localOrigin = req.headers.origin || `http://127.0.0.1:${req.socket.localPort}`;
 
   // Collect request body for POST/PUT/PATCH
   let body = [];
@@ -84,12 +85,18 @@ function proxyToCloud(req, res) {
       headers: {
         ...req.headers,
         host: parsedUrl.hostname,
-        // Remove local origin headers
+        // Spoof origin/referer so cloud server accepts the request
         origin: CLOUD_URL,
         referer: CLOUD_URL + '/',
       },
       timeout: 30000,
     };
+
+    // Forward cookies from the local browser to the cloud
+    // (cookies are stored locally but need to be sent to the cloud)
+    if (req.headers.cookie) {
+      options.headers.cookie = req.headers.cookie;
+    }
 
     // Remove hop-by-hop headers
     delete options.headers['connection'];
@@ -106,9 +113,33 @@ function proxyToCloud(req, res) {
       delete responseHeaders['content-encoding']; // Let Node handle encoding
       delete responseHeaders['transfer-encoding'];
 
-      // Allow local origin
-      responseHeaders['access-control-allow-origin'] = '*';
+      // Fix CORS: use the actual local origin (not wildcard) so credentials work
+      // When Access-Control-Allow-Origin is '*', browsers block credentials
+      responseHeaders['access-control-allow-origin'] = localOrigin;
       responseHeaders['access-control-allow-credentials'] = 'true';
+      responseHeaders['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, PATCH, OPTIONS';
+      responseHeaders['access-control-allow-headers'] = 'Content-Type, Authorization, Cookie, X-Requested-With';
+
+      // Fix Set-Cookie headers from cloud server for local origin
+      // Remove Domain, Path restrictions, and SameSite=None (which requires Secure)
+      // so cookies work on http://127.0.0.1
+      if (responseHeaders['set-cookie']) {
+        const cookies = Array.isArray(responseHeaders['set-cookie'])
+          ? responseHeaders['set-cookie']
+          : [responseHeaders['set-cookie']];
+        responseHeaders['set-cookie'] = cookies.map(cookie => {
+          return cookie
+            .replace(/;\s*Domain=[^;]*/gi, '')       // Remove Domain restriction
+            .replace(/;\s*SameSite=None/gi, '; SameSite=Lax')  // SameSite=None requires Secure (HTTPS)
+            .replace(/;\s*Secure/gi, '')              // Remove Secure flag (we're on HTTP locally)
+            .replace(/;\s*Path=\//gi, '; Path=/')     // Keep Path=/
+        });
+      }
+
+      // Remove restrictive cross-origin headers that might block Electron
+      delete responseHeaders['cross-origin-resource-policy'];
+      delete responseHeaders['cross-origin-opener-policy'];
+      delete responseHeaders['x-frame-options'];
 
       res.writeHead(proxyRes.statusCode, responseHeaders);
       proxyRes.pipe(res);
@@ -116,7 +147,11 @@ function proxyToCloud(req, res) {
 
     proxyReq.on('error', (err) => {
       console.error(`[LocalServer] Proxy error for ${req.url}:`, err.message);
-      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.writeHead(502, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': localOrigin,
+        'Access-Control-Allow-Credentials': 'true',
+      });
       res.end(JSON.stringify({
         error: 'PROXY_ERROR',
         message: 'No se pudo conectar al servidor. Verifique su conexión a internet.',
@@ -126,7 +161,11 @@ function proxyToCloud(req, res) {
 
     proxyReq.on('timeout', () => {
       proxyReq.destroy();
-      res.writeHead(504, { 'Content-Type': 'application/json' });
+      res.writeHead(504, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': localOrigin,
+        'Access-Control-Allow-Credentials': 'true',
+      });
       res.end(JSON.stringify({
         error: 'PROXY_TIMEOUT',
         message: 'La conexión al servidor tardó demasiado.',
@@ -182,10 +221,11 @@ function startLocalServer() {
     const server = http.createServer((req, res) => {
       const urlPath = req.url.split('?')[0];
 
-      // Handle CORS preflight
+      // Handle CORS preflight — use actual origin (not wildcard) so credentials work
       if (req.method === 'OPTIONS') {
+        const origin = req.headers.origin || `http://127.0.0.1:${server.address()?.port || 0}`;
         res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Origin': origin,
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, Authorization, Cookie, X-Requested-With',
           'Access-Control-Allow-Credentials': 'true',
