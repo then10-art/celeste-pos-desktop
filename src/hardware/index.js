@@ -272,12 +272,15 @@ async function printViaSystem(receiptData, paperSize = '80') {
     printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 
     printWin.webContents.on('did-finish-load', () => {
+      // Convert paper size mm to microns for Electron's pageSize
+      const widthMicrons = paperSize === '58' ? 58000 : 80000;
       printWin.webContents.print(
         {
           silent: true,
           printBackground: true,
           deviceName: printerName,
           margins: { marginType: 'none' },
+          pageSize: { width: widthMicrons, height: 297000 }, // width in microns, height auto (long receipt)
         },
         (success, failureReason) => {
           printWin.close();
@@ -310,12 +313,87 @@ async function getAutoDetectedPrinterName() {
   }
 }
 
+// ─── Convert ReceiptData to lines format ─────────────────────────────────────
+// The web app sends rich ReceiptData objects; convert them to the simple lines[] format
+function convertReceiptDataToLines(data) {
+  if (data.lines) return data; // Already in lines format
+  if (!data.storeName && !data.items) return data; // Unknown format, pass through
+
+  const lines = [];
+  // Header
+  lines.push({ type: 'title', text: data.storeName || 'Supermercado' });
+  if (data.storeAddress) lines.push({ type: 'text', text: data.storeAddress, align: 'center' });
+  if (data.storePhone) lines.push({ type: 'text', text: `Tel: ${data.storePhone}`, align: 'center' });
+  if (data.storeRnc) lines.push({ type: 'text', text: `RNC: ${data.storeRnc}`, align: 'center' });
+  lines.push({ type: 'divider' });
+
+  // NCF / Comprobante Fiscal
+  if (data.ncfNumber) {
+    lines.push({ type: 'subtitle', text: 'COMPROBANTE FISCAL' });
+    lines.push({ type: 'row', label: 'NCF:', value: data.ncfNumber });
+  }
+
+  // Ticket info
+  lines.push({ type: 'subtitle', text: `RECIBO #${data.ticketNumber || ''}` });
+  lines.push({ type: 'row', label: 'Fecha:', value: data.date || '' });
+  lines.push({ type: 'row', label: 'Cajero:', value: data.cashierName || '' });
+  if (data.customerName) lines.push({ type: 'row', label: 'Cliente:', value: data.customerName });
+  if (data.customerRnc) lines.push({ type: 'row', label: 'RNC/Cédula:', value: data.customerRnc });
+  lines.push({ type: 'divider' });
+
+  // Items
+  for (const item of (data.items || [])) {
+    const qty = item.isWeighed ? `${parseFloat(item.quantity).toFixed(3)}kg` : `${item.quantity}`;
+    const price = parseFloat(item.unitPrice || 0).toFixed(2);
+    const total = parseFloat(item.total || 0).toFixed(2);
+    lines.push({ type: 'text', text: `${qty} x ${item.name}` });
+    lines.push({ type: 'row', label: `  @${price}`, value: total });
+  }
+  lines.push({ type: 'divider' });
+
+  // Totals
+  const subtotal = parseFloat(data.subtotal || 0).toFixed(2);
+  const tax = parseFloat(data.taxAmount || 0).toFixed(2);
+  const total = parseFloat(data.total || 0).toFixed(2);
+  lines.push({ type: 'row', label: 'Subtotal:', value: `RD$ ${subtotal}` });
+  if (data.taxBreakdown) {
+    if (data.taxBreakdown.itbis18 > 0) lines.push({ type: 'row', label: '  ITBIS 18%:', value: `RD$ ${data.taxBreakdown.itbis18.toFixed(2)}` });
+    if (data.taxBreakdown.itbis16 > 0) lines.push({ type: 'row', label: '  ITBIS 16%:', value: `RD$ ${data.taxBreakdown.itbis16.toFixed(2)}` });
+  }
+  lines.push({ type: 'row', label: 'ITBIS:', value: `RD$ ${tax}` });
+  lines.push({ type: 'bold-row', label: 'TOTAL:', value: `RD$ ${total}` });
+  lines.push({ type: 'divider' });
+
+  // Payments
+  const PAYMENT_LABELS = {
+    cash_dop: 'Efectivo RD$', cash_usd: 'Efectivo US$', card: 'Tarjeta',
+    transfer: 'Transferencia', check: 'Cheque', coupon: 'Cupón/Bono', store_credit: 'Crédito Tienda',
+  };
+  for (const p of (data.payments || [])) {
+    const label = PAYMENT_LABELS[p.method] || p.method;
+    lines.push({ type: 'row', label: `${label}:`, value: `RD$ ${parseFloat(p.amount || 0).toFixed(2)}` });
+  }
+  if (data.change && parseFloat(data.change) > 0) {
+    lines.push({ type: 'bold-row', label: 'CAMBIO:', value: `RD$ ${parseFloat(data.change).toFixed(2)}` });
+  }
+  lines.push({ type: 'divider' });
+
+  // Footer
+  if (data.footerMessage) lines.push({ type: 'text', text: data.footerMessage, align: 'center' });
+  lines.push({ type: 'text', text: 'Conserve este recibo para cualquier', align: 'center' });
+  lines.push({ type: 'text', text: 'reclamación o devolución.', align: 'center' });
+
+  return { ...data, lines };
+}
+
 // ─── Build Receipt HTML ──────────────────────────────────────────────────────
 function buildReceiptHTML(receiptData, paperSize = '80') {
   const width = paperSize === '58' ? '48mm' : '72mm';
   let body = '';
 
-  for (const line of (receiptData.lines || [])) {
+  // Convert ReceiptData format to lines if needed
+  const normalized = convertReceiptDataToLines(receiptData);
+  for (const line of (normalized.lines || [])) {
     switch (line.type) {
       case 'title':
         body += `<div style="text-align:center;font-weight:bold;font-size:16px;text-decoration:underline;margin:4px 0">${escapeHtml(line.text)}</div>`;
