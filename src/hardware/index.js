@@ -274,13 +274,18 @@ async function printViaSystem(receiptData, paperSize = '80') {
     printWin.webContents.on('did-finish-load', () => {
       // Convert paper size mm to microns for Electron's pageSize
       const widthMicrons = paperSize === '58' ? 58000 : 80000;
+      // Calculate height based on content (lines * ~4mm + padding)
+      const normalized = convertReceiptDataToLines(receiptData);
+      const lineCount = (normalized.lines || []).length;
+      const heightMm = Math.max(50, lineCount * 4 + 10);
+      const heightMicrons = heightMm * 1000;
       printWin.webContents.print(
         {
           silent: true,
           printBackground: true,
           deviceName: printerName,
           margins: { marginType: 'none' },
-          pageSize: { width: widthMicrons, height: 297000 }, // width in microns, height auto (long receipt)
+          pageSize: { width: widthMicrons, height: heightMicrons },
         },
         (success, failureReason) => {
           printWin.close();
@@ -390,43 +395,49 @@ function convertReceiptDataToLines(data) {
 function buildReceiptHTML(receiptData, paperSize = '80') {
   const width = paperSize === '58' ? '48mm' : '72mm';
   let body = '';
+  let lineCount = 0;
 
   // Convert ReceiptData format to lines if needed
   const normalized = convertReceiptDataToLines(receiptData);
   for (const line of (normalized.lines || [])) {
+    lineCount++;
     switch (line.type) {
       case 'title':
-        body += `<div style="text-align:center;font-weight:bold;font-size:16px;text-decoration:underline;margin:4px 0">${escapeHtml(line.text)}</div>`;
+        body += `<div style="text-align:center;font-weight:bold;font-size:14pt;margin:3mm 0">${escapeHtml(line.text)}</div>`;
         break;
       case 'subtitle':
-        body += `<div style="text-align:center;font-weight:bold;font-size:12px;margin:2px 0">${escapeHtml(line.text)}</div>`;
+        body += `<div style="text-align:center;font-weight:bold;font-size:10pt;margin:2mm 0">${escapeHtml(line.text)}</div>`;
         break;
       case 'text': {
         const align = line.align === 'right' ? 'right' : line.align === 'center' ? 'center' : 'left';
-        body += `<div style="text-align:${align};font-size:11px;margin:1px 0">${escapeHtml(line.text)}</div>`;
+        body += `<div style="text-align:${align};font-size:9pt;margin:0.5mm 0">${escapeHtml(line.text)}</div>`;
         break;
       }
       case 'row':
-        body += `<div style="display:flex;justify-content:space-between;font-size:11px;margin:1px 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
+        body += `<div style="display:flex;justify-content:space-between;font-size:9pt;margin:0.5mm 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
         break;
       case 'bold-row':
-        body += `<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:bold;margin:1px 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
+        body += `<div style="display:flex;justify-content:space-between;font-size:10pt;font-weight:bold;margin:1mm 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
         break;
       case 'divider':
-        body += `<div style="border-top:1px dashed #000;margin:4px 0"></div>`;
+        body += `<div style="border-top:1px dashed #000;margin:2mm 0"></div>`;
         break;
       case 'barcode':
-        body += `<div style="text-align:center;font-family:monospace;font-size:14px;margin:4px 0">*${escapeHtml(line.value || '')}*</div>`;
+        body += `<div style="text-align:center;font-family:monospace;font-size:12pt;margin:2mm 0">*${escapeHtml(line.value || '')}*</div>`;
         break;
       case 'spacer':
-        body += `<div style="height:8px"></div>`;
+        body += `<div style="height:4mm"></div>`;
         break;
     }
   }
 
+  // Calculate approximate height: ~4mm per line + 10mm padding
+  const estimatedHeightMm = Math.max(50, lineCount * 4 + 10);
+
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    @page { size: ${width} auto; margin: 0; }
-    body { font-family: 'Courier New', monospace; width: ${width}; margin: 0; padding: 2mm; }
+    @page { size: ${width} ${estimatedHeightMm}mm; margin: 0; }
+    * { box-sizing: border-box; }
+    body { font-family: 'Courier New', 'Lucida Console', monospace; width: ${width}; margin: 0; padding: 2mm; }
   </style></head><body>${body}</body></html>`;
 }
 
