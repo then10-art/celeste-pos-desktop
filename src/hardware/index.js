@@ -280,10 +280,10 @@ async function printViaSystem(receiptData, paperSize = '80') {
     printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Use a very tall page to avoid pagination - thermal printers cut after content
-      // Width: 80mm or 58mm in microns. Height: 3000mm (3 meters) ensures all content fits one "page"
+      // Width: 80mm or 58mm in microns. Height: 200mm (enough for most receipts)
+      // Using a reasonable height prevents driver scaling issues
       const widthMicrons = paperSize === '58' ? 58000 : 80000;
-      const heightMicrons = 3000000; // 3 meters - thermal printer will auto-cut after content
+      const heightMicrons = 200000; // 200mm - reasonable receipt length
 
       printWin.webContents.print(
         {
@@ -440,9 +440,9 @@ function buildReceiptHTML(receiptData, paperSize = '80') {
   }
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    @page { margin: 0; }
+    @page { margin: 0; padding: 0; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Courier New', 'Lucida Console', monospace; width: 100%; margin: 0; padding: 2mm; -webkit-print-color-adjust: exact; }
+    html, body { width: 100%; margin: 0; padding: 2mm; font-family: 'Courier New', 'Lucida Console', monospace; font-size: 9pt; color: #000 !important; background: #fff !important; -webkit-print-color-adjust: exact; }
   </style></head><body>${body}</body></html>`;
 }
 
