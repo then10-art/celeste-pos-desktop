@@ -934,8 +934,77 @@ function checkForUpdates(showNoUpdateDialog = false) {
 
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
 ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
+  // Handle label printing (pre-built HTML with custom page size)
+  if (paperSize === 'label' && receiptData.html) {
+    return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'));
+  }
   return await printReceipt(receiptData, paperSize);
 });
+
+// ─── Label Printing (HTML with @page size) ──────────────────────────────────
+ipcMain.handle('print-label', async (event, { html, printerName }) => {
+  const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
+  return await printLabelHTML(html, name);
+});
+
+ipcMain.handle('save-label-printer', (event, printerName) => {
+  store.set('labelPrinterName', printerName);
+  return true;
+});
+
+ipcMain.handle('get-label-printer', () => {
+  return store.get('labelPrinterName') || '';
+});
+
+async function printLabelHTML(html, printerName) {
+  if (!mainWindow) throw new Error('No window reference');
+  if (!printerName) {
+    // Auto-detect
+    const printers = mainWindow.webContents.getPrinters();
+    const filtered = printers.filter(p => !['Microsoft XPS Document Writer', 'Fax', 'Microsoft Print to PDF'].includes(p.name));
+    if (filtered.length > 0) printerName = filtered[0].name;
+    else throw new Error('No printer found');
+  }
+
+  return new Promise((resolve, reject) => {
+    const { BrowserWindow: BW } = require('electron');
+    const printWin = new BW({
+      show: false,
+      width: 400,
+      height: 400,
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+
+    printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+    printWin.webContents.on('did-finish-load', () => {
+      // Wait a moment for images to render
+      setTimeout(() => {
+        printWin.webContents.print(
+          {
+            silent: true,
+            printBackground: true,
+            deviceName: printerName,
+            margins: { marginType: 'none' },
+          },
+          (success, failureReason) => {
+            printWin.close();
+            if (success) {
+              resolve({ success: true });
+            } else {
+              reject(new Error(failureReason || 'Label print failed'));
+            }
+          }
+        );
+      }, 500);
+    });
+
+    setTimeout(() => {
+      try { printWin.close(); } catch { /* ignore */ }
+      reject(new Error('Label print timeout'));
+    }, 15000);
+  });
+}
 
 ipcMain.handle('open-cash-drawer', async () => {
   return await openCashDrawer();

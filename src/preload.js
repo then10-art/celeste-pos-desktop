@@ -77,6 +77,16 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   savePrinterConfig: (config) =>
     ipcRenderer.invoke('save-printer-config', config),
 
+  // ── Label Printer ───────────────────────────────────────────────────────────────
+  printLabel: (html, printerName) =>
+    ipcRenderer.invoke('print-label', { html, printerName }),
+
+  saveLabelPrinter: (printerName) =>
+    ipcRenderer.invoke('save-label-printer', printerName),
+
+  getLabelPrinter: () =>
+    ipcRenderer.invoke('get-label-printer'),
+
   // ── Settings ──────────────────────────────────────────────────────────────
   getSettings: () =>
     ipcRenderer.invoke('get-settings'),
