@@ -936,15 +936,15 @@ function checkForUpdates(showNoUpdateDialog = false) {
 ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   // Handle label printing (pre-built HTML with custom page size)
   if (paperSize === 'label' && receiptData.html) {
-    return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'));
+    return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'), receiptData.widthMm, receiptData.heightMm);
   }
   return await printReceipt(receiptData, paperSize);
 });
 
 // ─── Label Printing (HTML with @page size) ──────────────────────────────────
-ipcMain.handle('print-label', async (event, { html, printerName }) => {
+ipcMain.handle('print-label', async (event, { html, printerName, widthMm, heightMm }) => {
   const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
-  return await printLabelHTML(html, name);
+  return await printLabelHTML(html, name, widthMm, heightMm);
 });
 
 ipcMain.handle('save-label-printer', (event, printerName) => {
@@ -956,15 +956,27 @@ ipcMain.handle('get-label-printer', () => {
   return store.get('labelPrinterName') || '';
 });
 
-async function printLabelHTML(html, printerName) {
+async function printLabelHTML(html, printerName, widthMm, heightMm) {
   if (!mainWindow) throw new Error('No window reference');
   if (!printerName) {
-    // Auto-detect
+    // Auto-detect: prefer 4BARCODE, then any non-system printer
     const printers = mainWindow.webContents.getPrinters();
-    const filtered = printers.filter(p => !['Microsoft XPS Document Writer', 'Fax', 'Microsoft Print to PDF'].includes(p.name));
-    if (filtered.length > 0) printerName = filtered[0].name;
-    else throw new Error('No printer found');
+    const barcodePrinter = printers.find(p => p.name.includes('4BARCODE') || p.name.includes('4B-'));
+    if (barcodePrinter) {
+      printerName = barcodePrinter.name;
+    } else {
+      const filtered = printers.filter(p => !['Microsoft XPS Document Writer', 'Fax', 'Microsoft Print to PDF', 'EPSON ET-2550 Series'].includes(p.name));
+      if (filtered.length > 0) printerName = filtered[0].name;
+      else throw new Error('No printer found');
+    }
   }
+
+  // Convert mm to microns (1mm = 1000 microns)
+  // Default to 48x32mm (Mediana) if not specified
+  const wMicrons = (widthMm || 48) * 1000;
+  const hMicrons = (heightMm || 32) * 1000;
+
+  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${widthMm || 48}x${heightMm || 32}mm)`);
 
   return new Promise((resolve, reject) => {
     const { BrowserWindow: BW } = require('electron');
@@ -978,7 +990,7 @@ async function printLabelHTML(html, printerName) {
     printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Wait a moment for images to render
+      // Wait a moment for images/barcodes to render
       setTimeout(() => {
         printWin.webContents.print(
           {
@@ -986,17 +998,27 @@ async function printLabelHTML(html, printerName) {
             printBackground: true,
             deviceName: printerName,
             margins: { marginType: 'none' },
+            pageSize: { width: wMicrons, height: hMicrons },
+            scaleFactor: 100,
           },
           (success, failureReason) => {
             printWin.close();
             if (success) {
+              console.log('[Label Print] Success');
               resolve({ success: true });
             } else {
+              console.error('[Label Print] Failed:', failureReason);
               reject(new Error(failureReason || 'Label print failed'));
             }
           }
         );
-      }, 500);
+      }, 800);
+    });
+
+    printWin.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
+      console.error('[Label Print] Failed to load HTML:', errorDesc);
+      try { printWin.close(); } catch { /* ignore */ }
+      reject(new Error(`Failed to load label HTML: ${errorDesc}`));
     });
 
     setTimeout(() => {
