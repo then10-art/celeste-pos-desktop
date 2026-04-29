@@ -12,6 +12,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const zlib = require('zlib');
 
 const CLOUD_URL = 'https://celestepos.live';
 
@@ -103,6 +104,12 @@ function proxyToCloud(req, res) {
     delete options.headers['keep-alive'];
     delete options.headers['transfer-encoding'];
 
+    // CRITICAL: Remove Accept-Encoding so the cloud returns uncompressed content.
+    // If we forward the browser's Accept-Encoding (gzip/br), the cloud returns
+    // compressed bytes. We strip content-encoding header but pipe raw bytes,
+    // causing the browser to receive garbled data it can't parse as JSON.
+    delete options.headers['accept-encoding'];
+
     if (bodyBuffer.length > 0) {
       options.headers['content-length'] = bodyBuffer.length;
     }
@@ -110,8 +117,11 @@ function proxyToCloud(req, res) {
     const proxyReq = https.request(options, (proxyRes) => {
       // Forward response headers, but fix CORS for local origin
       const responseHeaders = { ...proxyRes.headers };
-      delete responseHeaders['content-encoding']; // Let Node handle encoding
+      const contentEncoding = (responseHeaders['content-encoding'] || '').toLowerCase();
+      delete responseHeaders['content-encoding'];
       delete responseHeaders['transfer-encoding'];
+      // Also remove content-length since we may be decompressing
+      delete responseHeaders['content-length'];
 
       // Fix CORS: use the actual local origin (not wildcard) so credentials work
       // When Access-Control-Allow-Origin is '*', browsers block credentials
@@ -142,7 +152,22 @@ function proxyToCloud(req, res) {
       delete responseHeaders['x-frame-options'];
 
       res.writeHead(proxyRes.statusCode, responseHeaders);
-      proxyRes.pipe(res);
+
+      // Decompress if the cloud still returns compressed content despite
+      // us removing Accept-Encoding (e.g., Cloudflare may still compress)
+      let stream = proxyRes;
+      if (contentEncoding === 'gzip' || contentEncoding === 'x-gzip') {
+        stream = proxyRes.pipe(zlib.createGunzip());
+      } else if (contentEncoding === 'deflate') {
+        stream = proxyRes.pipe(zlib.createInflate());
+      } else if (contentEncoding === 'br') {
+        stream = proxyRes.pipe(zlib.createBrotliDecompress());
+      }
+      stream.pipe(res);
+      stream.on('error', (err) => {
+        console.error('[LocalServer] Decompression error:', err.message);
+        res.end();
+      });
     });
 
     proxyReq.on('error', (err) => {
