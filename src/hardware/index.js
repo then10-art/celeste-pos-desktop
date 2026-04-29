@@ -257,7 +257,15 @@ async function printViaSystem(receiptData, paperSize = '80') {
   if (!printerName) throw new Error('No receipt printer found');
 
   // Build simple HTML receipt for system printing
+  console.log('[Hardware] Receipt data received:', JSON.stringify({
+    storeName: receiptData.storeName,
+    itemCount: (receiptData.items || []).length,
+    total: receiptData.total,
+    hasLines: !!receiptData.lines,
+    paperSize,
+  }));
   const html = buildReceiptHTML(receiptData, paperSize);
+  console.log('[Hardware] Printing receipt to:', printerName, 'paperSize:', paperSize, 'htmlLength:', html.length);
 
   return new Promise((resolve, reject) => {
     // Create a hidden window for printing
@@ -265,20 +273,18 @@ async function printViaSystem(receiptData, paperSize = '80') {
     const printWin = new BrowserWindow({
       show: false,
       width: paperSize === '58' ? 220 : 302,
-      height: 900,
+      height: 2000,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
     printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Convert paper size mm to microns for Electron's pageSize
+      // Use a very tall page to avoid pagination - thermal printers cut after content
+      // Width: 80mm or 58mm in microns. Height: 3000mm (3 meters) ensures all content fits one "page"
       const widthMicrons = paperSize === '58' ? 58000 : 80000;
-      // Calculate height based on content (lines * ~4mm + padding)
-      const normalized = convertReceiptDataToLines(receiptData);
-      const lineCount = (normalized.lines || []).length;
-      const heightMm = Math.max(50, lineCount * 4 + 10);
-      const heightMicrons = heightMm * 1000;
+      const heightMicrons = 3000000; // 3 meters - thermal printer will auto-cut after content
+
       printWin.webContents.print(
         {
           silent: true,
@@ -290,8 +296,10 @@ async function printViaSystem(receiptData, paperSize = '80') {
         (success, failureReason) => {
           printWin.close();
           if (success) {
+            console.log('[Hardware] Receipt printed successfully');
             resolve({ success: true });
           } else {
+            console.error('[Hardware] Print failed:', failureReason);
             reject(new Error(failureReason || 'Print failed'));
           }
         }
@@ -431,13 +439,10 @@ function buildReceiptHTML(receiptData, paperSize = '80') {
     }
   }
 
-  // Calculate approximate height: ~4mm per line + 10mm padding
-  const estimatedHeightMm = Math.max(50, lineCount * 4 + 10);
-
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    @page { size: ${width} ${estimatedHeightMm}mm; margin: 0; }
-    * { box-sizing: border-box; }
-    body { font-family: 'Courier New', 'Lucida Console', monospace; width: ${width}; margin: 0; padding: 2mm; }
+    @page { margin: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Courier New', 'Lucida Console', monospace; width: 100%; margin: 0; padding: 2mm; -webkit-print-color-adjust: exact; }
   </style></head><body>${body}</body></html>`;
 }
 
