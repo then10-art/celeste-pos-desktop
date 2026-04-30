@@ -236,8 +236,21 @@ async function printReceipt(receiptData, paperSize) {
   if (printerConfig.type === 'network') return printNetwork(receiptData);
   if (printerConfig.type === 'serial')  return printSerial(receiptData);
 
-  // Try Windows system printer first (works with "80mm Series Printer" and similar)
-  if (printerConfig.printerName || mainWindowRef) {
+  // Determine printer name
+  const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
+
+  // Try raw ESC/POS first (best for thermal printers - sends binary commands directly)
+  if (printerName && process.platform === 'win32') {
+    try {
+      console.log('[Hardware] Trying raw ESC/POS to:', printerName);
+      return await printRawEscPos(receiptData, printerName);
+    } catch (err) {
+      console.warn('[Hardware] Raw ESC/POS failed:', err.message, '- trying HTML fallback');
+    }
+  }
+
+  // Fallback: Try HTML-based system printing via webContents.print()
+  if (printerName || mainWindowRef) {
     try {
       return await printViaSystem(receiptData, paperSize);
     } catch (err) {
@@ -245,11 +258,202 @@ async function printReceipt(receiptData, paperSize) {
     }
   }
 
+  // Last resort: direct USB ESC/POS
   return printUsb(receiptData);
 }
 
-// ─── System Printer (Windows GDI) ────────────────────────────────────────────
-// Uses Electron's webContents.print() to send to a named Windows printer
+// ─── Raw ESC/POS via Windows Spooler ─────────────────────────────────────────
+// Builds ESC/POS binary commands and sends them directly to the printer
+// via Windows print spooler (bypasses webContents.print() which causes blank pages)
+async function printRawEscPos(receiptData, printerName) {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const { execSync } = require('child_process');
+
+  // Convert receipt data to lines format
+  const normalized = convertReceiptDataToLines(receiptData);
+  const lines = normalized.lines || [];
+
+  // Build ESC/POS binary commands
+  const ESC = 0x1B;
+  const GS = 0x1D;
+  const LF = 0x0A;
+  const buffers = [];
+
+  // Initialize printer
+  buffers.push(Buffer.from([ESC, 0x40])); // ESC @ - Initialize
+  buffers.push(Buffer.from([ESC, 0x74, 0x10])); // ESC t 16 - Set code page to WPC1252
+
+  for (const line of lines) {
+    switch (line.type) {
+      case 'title':
+        buffers.push(Buffer.from([ESC, 0x61, 0x01])); // Center align
+        buffers.push(Buffer.from([ESC, 0x45, 0x01])); // Bold on
+        buffers.push(Buffer.from([GS, 0x21, 0x11])); // Double width+height
+        buffers.push(Buffer.from(encodeText(line.text)));
+        buffers.push(Buffer.from([LF]));
+        buffers.push(Buffer.from([GS, 0x21, 0x00])); // Normal size
+        buffers.push(Buffer.from([ESC, 0x45, 0x00])); // Bold off
+        break;
+      case 'subtitle':
+        buffers.push(Buffer.from([ESC, 0x61, 0x01])); // Center
+        buffers.push(Buffer.from([ESC, 0x45, 0x01])); // Bold on
+        buffers.push(Buffer.from(encodeText(line.text)));
+        buffers.push(Buffer.from([LF]));
+        buffers.push(Buffer.from([ESC, 0x45, 0x00])); // Bold off
+        break;
+      case 'text': {
+        const align = line.align === 'right' ? 0x02 : line.align === 'center' ? 0x01 : 0x00;
+        buffers.push(Buffer.from([ESC, 0x61, align]));
+        buffers.push(Buffer.from(encodeText(line.text)));
+        buffers.push(Buffer.from([LF]));
+        break;
+      }
+      case 'row': {
+        buffers.push(Buffer.from([ESC, 0x61, 0x00])); // Left align
+        const label = (line.label || '').substring(0, 24).padEnd(24);
+        const value = (line.value || '').substring(0, 18).padStart(18);
+        buffers.push(Buffer.from(encodeText(label + value)));
+        buffers.push(Buffer.from([LF]));
+        break;
+      }
+      case 'bold-row': {
+        buffers.push(Buffer.from([ESC, 0x61, 0x00])); // Left align
+        buffers.push(Buffer.from([ESC, 0x45, 0x01])); // Bold on
+        const label = (line.label || '').substring(0, 24).padEnd(24);
+        const value = (line.value || '').substring(0, 18).padStart(18);
+        buffers.push(Buffer.from(encodeText(label + value)));
+        buffers.push(Buffer.from([LF]));
+        buffers.push(Buffer.from([ESC, 0x45, 0x00])); // Bold off
+        break;
+      }
+      case 'divider':
+        buffers.push(Buffer.from([ESC, 0x61, 0x00])); // Left align
+        buffers.push(Buffer.from(encodeText('-'.repeat(42))));
+        buffers.push(Buffer.from([LF]));
+        break;
+      case 'spacer':
+        buffers.push(Buffer.from([LF]));
+        break;
+    }
+  }
+
+  // Feed and cut
+  buffers.push(Buffer.from([LF, LF, LF])); // Feed 3 lines
+  buffers.push(Buffer.from([GS, 0x56, 0x00])); // Full cut
+
+  // Open cash drawer (ESC p 0 25 25)
+  buffers.push(Buffer.from([0x1B, 0x70, 0x00, 0x19, 0x19]));
+
+  // Combine all buffers
+  const rawData = Buffer.concat(buffers);
+  console.log('[Hardware] Built ESC/POS data:', rawData.length, 'bytes for', lines.length, 'lines');
+
+  // Write to temp file
+  const tmpFile = path.join(os.tmpdir(), `celeste-receipt-${Date.now()}.bin`);
+  fs.writeFileSync(tmpFile, rawData);
+
+  try {
+    // Send raw data to printer via Windows print spooler
+    // Method 1: Use PowerShell to send raw bytes
+    const psScript = `
+      $printerName = '${printerName.replace(/'/g, "''")}'
+      $bytes = [System.IO.File]::ReadAllBytes('${tmpFile.replace(/\\/g, '\\\\')}')
+      $printer = New-Object System.Drawing.Printing.PrintDocument
+      $printer.PrinterSettings.PrinterName = $printerName
+      # Use RawPrinterHelper via P/Invoke
+      Add-Type -TypeDefinition @"
+      using System;
+      using System.Runtime.InteropServices;
+      public class RawPrinter {
+        [StructLayout(LayoutKind.Sequential)] public struct DOCINFO { public string pDocName; public string pOutputFile; public string pDatatype; }
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartDocPrinter(IntPtr hPrinter, int Level, ref DOCINFO pDocInfo);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
+        [DllImport("winspool.drv", SetLastError=true)] public static extern bool ClosePrinter(IntPtr hPrinter);
+        public static bool SendRaw(string printerName, byte[] data) {
+          IntPtr hPrinter; int written;
+          if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) return false;
+          var di = new DOCINFO() { pDocName = "Celeste POS Receipt", pOutputFile = null, pDatatype = "RAW" };
+          StartDocPrinter(hPrinter, 1, ref di);
+          StartPagePrinter(hPrinter);
+          WritePrinter(hPrinter, data, data.Length, out written);
+          EndPagePrinter(hPrinter);
+          EndDocPrinter(hPrinter);
+          ClosePrinter(hPrinter);
+          return written == data.Length;
+        }
+      }
+"@
+      $result = [RawPrinter]::SendRaw($printerName, $bytes)
+      if ($result) { Write-Output 'OK' } else { Write-Error 'Failed to send raw data' }
+    `;
+    const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
+    fs.writeFileSync(psFile, psScript, 'utf-8');
+    
+    const result = execSync(`powershell -ExecutionPolicy Bypass -File "${psFile}"`, {
+      timeout: 10000,
+      encoding: 'utf-8',
+    });
+    console.log('[Hardware] Raw print result:', result.trim());
+    
+    // Cleanup
+    try { fs.unlinkSync(psFile); } catch { }
+    try { fs.unlinkSync(tmpFile); } catch { }
+    
+    return { success: true };
+  } catch (err) {
+    console.error('[Hardware] Raw print failed:', err.message);
+    // Cleanup
+    try { fs.unlinkSync(tmpFile); } catch { }
+    throw err;
+  }
+}
+
+// Encode text to Windows-1252 compatible bytes (handles Spanish characters)
+function encodeText(text) {
+  // Map common Spanish/special chars to Windows-1252 byte values
+  const result = [];
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 128) {
+      result.push(code);
+    } else {
+      // Common Spanish characters in Windows-1252
+      const map = {
+        0xe1: 0xe1, // á
+        0xe9: 0xe9, // é
+        0xed: 0xed, // í
+        0xf3: 0xf3, // ó
+        0xfa: 0xfa, // ú
+        0xf1: 0xf1, // ñ
+        0xc1: 0xc1, // Á
+        0xc9: 0xc9, // É
+        0xcd: 0xcd, // Í
+        0xd3: 0xd3, // Ó
+        0xda: 0xda, // Ú
+        0xd1: 0xd1, // Ñ
+        0xfc: 0xfc, // ü
+        0xdc: 0xdc, // Ü
+        0xbf: 0xbf, // ¿
+        0xa1: 0xa1, // ¡
+        0x2014: 0x97, // —
+        0x2013: 0x96, // –
+        0x2026: 0x85, // …
+        0x20: 0x20, // space
+      };
+      result.push(map[code] || 0x3f); // Use '?' for unmapped chars
+    }
+  }
+  return Buffer.from(result);
+}
+
+// ─── System Printer (Windows GDI) - FALLBACK ─────────────────────────────────
+// Uses Electron's webContents.print() - kept as fallback if raw printing fails
 async function printViaSystem(receiptData, paperSize = '80') {
   if (!mainWindowRef) throw new Error('No window reference');
 
@@ -267,6 +471,14 @@ async function printViaSystem(receiptData, paperSize = '80') {
   const html = buildReceiptHTML(receiptData, paperSize);
   console.log('[Hardware] Printing receipt to:', printerName, 'paperSize:', paperSize, 'htmlLength:', html.length);
 
+  // Write HTML to a temp file to avoid data: URL encoding issues
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const tmpFile = path.join(os.tmpdir(), `celeste-receipt-${Date.now()}.html`);
+  fs.writeFileSync(tmpFile, html, 'utf-8');
+  console.log('[Hardware] Wrote receipt HTML to:', tmpFile);
+
   return new Promise((resolve, reject) => {
     // Create a hidden window for printing
     const { BrowserWindow } = require('electron');
@@ -277,38 +489,47 @@ async function printViaSystem(receiptData, paperSize = '80') {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
-    printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    // Load from file:// instead of data: URL for reliable rendering
+    printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Width: 80mm or 58mm in microns. Height: 200mm (enough for most receipts)
-      // Using a reasonable height prevents driver scaling issues
-      const widthMicrons = paperSize === '58' ? 58000 : 80000;
-      const heightMicrons = 200000; // 200mm - reasonable receipt length
+      // Add a small delay to ensure CSS is fully applied and content is rendered
+      setTimeout(() => {
+        // Width: 80mm or 58mm in microns
+        // Height: use a large value to avoid pagination - thermal printers cut after content
+        const widthMicrons = paperSize === '58' ? 58000 : 80000;
+        const heightMicrons = 300000; // 300mm - thermal printers will cut at content end
 
-      printWin.webContents.print(
-        {
-          silent: true,
-          printBackground: true,
-          deviceName: printerName,
-          margins: { marginType: 'none' },
-          pageSize: { width: widthMicrons, height: heightMicrons },
-        },
-        (success, failureReason) => {
-          printWin.close();
-          if (success) {
-            console.log('[Hardware] Receipt printed successfully');
-            resolve({ success: true });
-          } else {
-            console.error('[Hardware] Print failed:', failureReason);
-            reject(new Error(failureReason || 'Print failed'));
+        console.log('[Hardware] Sending to printer:', printerName, 'pageSize:', widthMicrons, 'x', heightMicrons);
+
+        printWin.webContents.print(
+          {
+            silent: true,
+            printBackground: true,
+            deviceName: printerName,
+            margins: { marginType: 'none' },
+            pageSize: { width: widthMicrons, height: heightMicrons },
+          },
+          (success, failureReason) => {
+            printWin.close();
+            // Clean up temp file
+            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+            if (success) {
+              console.log('[Hardware] Receipt printed successfully');
+              resolve({ success: true });
+            } else {
+              console.error('[Hardware] Print failed:', failureReason);
+              reject(new Error(failureReason || 'Print failed'));
+            }
           }
-        }
-      );
+        );
+      }, 500); // 500ms delay for rendering
     });
 
     // Timeout safety
     setTimeout(() => {
       try { printWin.close(); } catch { /* ignore */ }
+      try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
       reject(new Error('Print timeout'));
     }, 15000);
   });
