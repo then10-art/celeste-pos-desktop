@@ -28,6 +28,8 @@ const RECEIPT_PRINTER_PATTERNS = [
   /rongta/i,
   /munbyn/i,
   /disashop/i,
+  /4barcode/i,
+  /barcode/i,
   /escpos/i,
   /esc[\s\/]pos/i,
 ];
@@ -354,64 +356,101 @@ async function printRawEscPos(receiptData, printerName) {
   const tmpFile = path.join(os.tmpdir(), `celeste-receipt-${Date.now()}.bin`);
   fs.writeFileSync(tmpFile, rawData);
 
+  // Try multiple methods to send raw data to the printer
+  const errors = [];
+
+  // Method 1: PowerShell RawPrinter P/Invoke (most reliable for named printers)
   try {
-    // Send raw data to printer via Windows print spooler
-    // Method 1: Use PowerShell to send raw bytes
+    console.log('[Hardware] Method 1: PowerShell RawPrinter P/Invoke');
     const psScript = `
-      $printerName = '${printerName.replace(/'/g, "''")}'
-      $bytes = [System.IO.File]::ReadAllBytes('${tmpFile.replace(/\\/g, '\\\\')}')
-      $printer = New-Object System.Drawing.Printing.PrintDocument
-      $printer.PrinterSettings.PrinterName = $printerName
-      # Use RawPrinterHelper via P/Invoke
-      Add-Type -TypeDefinition @"
-      using System;
-      using System.Runtime.InteropServices;
-      public class RawPrinter {
-        [StructLayout(LayoutKind.Sequential)] public struct DOCINFO { public string pDocName; public string pOutputFile; public string pDatatype; }
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartDocPrinter(IntPtr hPrinter, int Level, ref DOCINFO pDocInfo);
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
-        [DllImport("winspool.drv", SetLastError=true)] public static extern bool ClosePrinter(IntPtr hPrinter);
-        public static bool SendRaw(string printerName, byte[] data) {
-          IntPtr hPrinter; int written;
-          if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) return false;
-          var di = new DOCINFO() { pDocName = "Celeste POS Receipt", pOutputFile = null, pDatatype = "RAW" };
-          StartDocPrinter(hPrinter, 1, ref di);
-          StartPagePrinter(hPrinter);
-          WritePrinter(hPrinter, data, data.Length, out written);
-          EndPagePrinter(hPrinter);
-          EndDocPrinter(hPrinter);
-          ClosePrinter(hPrinter);
-          return written == data.Length;
-        }
-      }
+$ErrorActionPreference = 'Stop'
+$printerName = '${printerName.replace(/'/g, "''")}'
+$filePath = '${tmpFile.replace(/\\/g, '\\\\')}'
+$bytes = [System.IO.File]::ReadAllBytes($filePath)
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class RawPrinterHelper {
+  [StructLayout(LayoutKind.Sequential)] public struct DOCINFOA { [MarshalAs(UnmanagedType.LPStr)] public string pDocName; [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile; [MarshalAs(UnmanagedType.LPStr)] public string pDatatype; }
+  [DllImport("winspool.drv", EntryPoint="OpenPrinterA", SetLastError=true, CharSet=CharSet.Ansi)] public static extern bool OpenPrinter(string szPrinter, out IntPtr hPrinter, IntPtr pd);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartDocPrinter(IntPtr hPrinter, int level, ref DOCINFOA di);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool StartPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool WritePrinter(IntPtr hPrinter, byte[] pBytes, int dwCount, out int dwWritten);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndPagePrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool EndDocPrinter(IntPtr hPrinter);
+  [DllImport("winspool.drv", SetLastError=true)] public static extern bool ClosePrinter(IntPtr hPrinter);
+  public static bool SendRaw(string printer, byte[] data) {
+    IntPtr hPrinter; int written;
+    if (!OpenPrinter(printer, out hPrinter, IntPtr.Zero)) return false;
+    var di = new DOCINFOA() { pDocName = "CelestePOS", pOutputFile = null, pDatatype = "RAW" };
+    try {
+      StartDocPrinter(hPrinter, 1, ref di);
+      StartPagePrinter(hPrinter);
+      WritePrinter(hPrinter, data, data.Length, out written);
+      EndPagePrinter(hPrinter);
+      EndDocPrinter(hPrinter);
+    } finally { ClosePrinter(hPrinter); }
+    return written == data.Length;
+  }
+}
 "@
-      $result = [RawPrinter]::SendRaw($printerName, $bytes)
-      if ($result) { Write-Output 'OK' } else { Write-Error 'Failed to send raw data' }
-    `;
+$ok = [RawPrinterHelper]::SendRaw($printerName, $bytes)
+if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
+`;
     const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
     fs.writeFileSync(psFile, psScript, 'utf-8');
-    
-    const result = execSync(`powershell -ExecutionPolicy Bypass -File "${psFile}"`, {
-      timeout: 10000,
+    const result = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, {
+      timeout: 15000,
       encoding: 'utf-8',
+      windowsHide: true,
     });
-    console.log('[Hardware] Raw print result:', result.trim());
-    
-    // Cleanup
+    console.log('[Hardware] Raw print via PowerShell succeeded:', result.trim());
     try { fs.unlinkSync(psFile); } catch { }
     try { fs.unlinkSync(tmpFile); } catch { }
-    
     return { success: true };
   } catch (err) {
-    console.error('[Hardware] Raw print failed:', err.message);
-    // Cleanup
-    try { fs.unlinkSync(tmpFile); } catch { }
-    throw err;
+    errors.push(`PowerShell: ${err.message}`);
+    console.warn('[Hardware] Method 1 failed:', err.message);
   }
+
+  // Method 2: Use fsutil/copy to printer share (simpler, no .NET compilation)
+  try {
+    console.log('[Hardware] Method 2: copy /b to printer share');
+    execSync(`copy /b "${tmpFile}" "\\\\localhost\\${printerName}"`, {
+      timeout: 10000,
+      encoding: 'utf-8',
+      shell: 'cmd.exe',
+      windowsHide: true,
+    });
+    console.log('[Hardware] Raw print via copy /b succeeded');
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true };
+  } catch (err) {
+    errors.push(`copy /b: ${err.message}`);
+    console.warn('[Hardware] Method 2 failed:', err.message);
+  }
+
+  // Method 3: Use lpr command (available on Windows with LPR feature enabled)
+  try {
+    console.log('[Hardware] Method 3: lpr command');
+    execSync(`lpr -S localhost -P "${printerName}" -o l "${tmpFile}"`, {
+      timeout: 10000,
+      encoding: 'utf-8',
+      windowsHide: true,
+    });
+    console.log('[Hardware] Raw print via lpr succeeded');
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true };
+  } catch (err) {
+    errors.push(`lpr: ${err.message}`);
+    console.warn('[Hardware] Method 3 failed:', err.message);
+  }
+
+  // All methods failed - clean up and throw
+  try { fs.unlinkSync(tmpFile); } catch { }
+  const errMsg = `All raw print methods failed: ${errors.join(' | ')}`;
+  console.error('[Hardware]', errMsg);
+  throw new Error(errMsg);
 }
 
 // Encode text to Windows-1252 compatible bytes (handles Spanish characters)
