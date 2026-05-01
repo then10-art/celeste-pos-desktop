@@ -938,7 +938,14 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   if (paperSize === 'label' && receiptData.html) {
     return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'), receiptData.widthMm, receiptData.heightMm);
   }
-  return await printReceipt(receiptData, paperSize);
+  try {
+    const result = await printReceipt(receiptData, paperSize);
+    console.log('[IPC] print-receipt result:', JSON.stringify(result));
+    return result;
+  } catch (err) {
+    console.error('[IPC] print-receipt error:', err.message);
+    return { success: false, error: err.message };
+  }
 });
 
 // ─── Label Printing (HTML with @page size) ──────────────────────────────────

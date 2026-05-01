@@ -240,12 +240,14 @@ async function printReceipt(receiptData, paperSize) {
 
   // Determine printer name
   const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
+  console.log('[Hardware] printReceipt called, printerName:', printerName, 'type:', printerConfig.type, 'paperSize:', paperSize);
 
   // Try raw ESC/POS first (best for thermal printers - sends binary commands directly)
   if (printerName && process.platform === 'win32') {
     try {
       console.log('[Hardware] Trying raw ESC/POS to:', printerName);
-      return await printRawEscPos(receiptData, printerName);
+      const result = await printRawEscPos(receiptData, printerName);
+      return { ...result, method: 'raw-escpos', printerName };
     } catch (err) {
       console.warn('[Hardware] Raw ESC/POS failed:', err.message, '- trying HTML fallback');
     }
@@ -254,7 +256,8 @@ async function printReceipt(receiptData, paperSize) {
   // Fallback: Try HTML-based system printing via webContents.print()
   if (printerName || mainWindowRef) {
     try {
-      return await printViaSystem(receiptData, paperSize);
+      const result = await printViaSystem(receiptData, paperSize);
+      return { ...result, method: 'html-system', printerName };
     } catch (err) {
       console.warn('[Hardware] System print failed, trying USB direct:', err.message);
     }
@@ -267,6 +270,7 @@ async function printReceipt(receiptData, paperSize) {
 // ─── Raw ESC/POS via Windows Spooler ─────────────────────────────────────────
 // Builds ESC/POS binary commands and sends them directly to the printer
 // via Windows print spooler (bypasses webContents.print() which causes blank pages)
+// Optimized for Windows 7 compatibility
 async function printRawEscPos(receiptData, printerName) {
   const os = require('os');
   const path = require('path');
@@ -276,6 +280,7 @@ async function printRawEscPos(receiptData, printerName) {
   // Convert receipt data to lines format
   const normalized = convertReceiptDataToLines(receiptData);
   const lines = normalized.lines || [];
+  console.log('[Hardware] Converting receipt to ESC/POS, lines:', lines.length);
 
   // Build ESC/POS binary commands
   const ESC = 0x1B;
@@ -358,14 +363,91 @@ async function printRawEscPos(receiptData, printerName) {
 
   // Try multiple methods to send raw data to the printer
   const errors = [];
+  const safePrinterName = printerName.replace(/'/g, "''");
+  const safeTmpFile = tmpFile.replace(/\\/g, '\\\\');
 
-  // Method 1: PowerShell RawPrinter P/Invoke (most reliable for named printers)
+  // Method 0: NET USE + COPY (most reliable on Windows 7)
+  // Maps the printer to a local port, copies the raw data, then unmaps
   try {
-    console.log('[Hardware] Method 1: PowerShell RawPrinter P/Invoke');
+    console.log('[Hardware] Method 0: NET USE LPT3 + COPY /B');
+    // First try to release LPT3 if already mapped
+    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+    // Map printer to LPT3
+    execSync(`net use LPT3: "\\\\localhost\\${printerName}" /persistent:no`, {
+      timeout: 8000, shell: 'cmd.exe', windowsHide: true,
+    });
+    // Copy raw data to the mapped port
+    execSync(`copy /b "${tmpFile}" LPT3:`, {
+      timeout: 10000, shell: 'cmd.exe', windowsHide: true,
+    });
+    // Cleanup
+    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+    console.log('[Hardware] Raw print via NET USE + COPY succeeded');
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true, method: 'net-use-copy' };
+  } catch (err) {
+    errors.push(`NET USE: ${err.message}`);
+    console.warn('[Hardware] Method 0 failed:', err.message);
+    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+  }
+
+  // Method 1: PowerShell with .NET WMI (simpler than Add-Type, works on PS 2.0+)
+  try {
+    console.log('[Hardware] Method 1: PowerShell WMI raw print');
+    // Use a simpler PowerShell approach that doesn't require Add-Type compilation
     const psScript = `
 $ErrorActionPreference = 'Stop'
-$printerName = '${printerName.replace(/'/g, "''")}'
-$filePath = '${tmpFile.replace(/\\/g, '\\\\')}'
+$printerName = '${safePrinterName}'
+$filePath = '${safeTmpFile}'
+try {
+  # Try using .NET Framework directly (available on all Windows versions)
+  $bytes = [System.IO.File]::ReadAllBytes($filePath)
+  # Open printer handle via winspool.drv through reflection
+  $winspool = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+  # Fallback: write to printer port file
+  $printer = Get-WmiObject -Query "SELECT * FROM Win32_Printer WHERE Name='$($printerName -replace "'","''")'"
+  if ($printer -and $printer.PortName) {
+    $port = $printer.PortName
+    if ($port -match '^(COM|LPT)') {
+      # Direct port access
+      [System.IO.File]::WriteAllBytes($port, $bytes)
+      Write-Output 'OK-PORT'
+    } elseif ($port -match '^USB') {
+      # USB port - try spooler
+      $printJob = $printer.PSBase.InvokeMethod('PrintTestPage', $null)
+      throw 'USB port requires spooler method'
+    } else {
+      throw "Unknown port type: $port"
+    }
+  } else {
+    throw 'Printer not found via WMI'
+  }
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
+`;
+    const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
+    fs.writeFileSync(psFile, psScript, 'utf-8');
+    const result = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, {
+      timeout: 15000, encoding: 'utf-8', windowsHide: true,
+    });
+    console.log('[Hardware] Raw print via PowerShell WMI succeeded:', result.trim());
+    try { fs.unlinkSync(psFile); } catch { }
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true, method: 'ps-wmi' };
+  } catch (err) {
+    errors.push(`PowerShell WMI: ${err.message}`);
+    console.warn('[Hardware] Method 1 failed:', err.message);
+  }
+
+  // Method 2: PowerShell RawPrinter P/Invoke (works on PS 3.0+ / Win8+)
+  try {
+    console.log('[Hardware] Method 2: PowerShell RawPrinter P/Invoke');
+    const psScript = `
+$ErrorActionPreference = 'Stop'
+$printerName = '${safePrinterName}'
+$filePath = '${safeTmpFile}'
 $bytes = [System.IO.File]::ReadAllBytes($filePath)
 Add-Type -TypeDefinition @"
 using System;
@@ -400,50 +482,57 @@ if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
     const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
     fs.writeFileSync(psFile, psScript, 'utf-8');
     const result = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, {
-      timeout: 15000,
-      encoding: 'utf-8',
-      windowsHide: true,
+      timeout: 15000, encoding: 'utf-8', windowsHide: true,
     });
-    console.log('[Hardware] Raw print via PowerShell succeeded:', result.trim());
+    console.log('[Hardware] Raw print via PowerShell P/Invoke succeeded:', result.trim());
     try { fs.unlinkSync(psFile); } catch { }
     try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true };
+    return { success: true, method: 'ps-pinvoke' };
   } catch (err) {
-    errors.push(`PowerShell: ${err.message}`);
-    console.warn('[Hardware] Method 1 failed:', err.message);
-  }
-
-  // Method 2: Use fsutil/copy to printer share (simpler, no .NET compilation)
-  try {
-    console.log('[Hardware] Method 2: copy /b to printer share');
-    execSync(`copy /b "${tmpFile}" "\\\\localhost\\${printerName}"`, {
-      timeout: 10000,
-      encoding: 'utf-8',
-      shell: 'cmd.exe',
-      windowsHide: true,
-    });
-    console.log('[Hardware] Raw print via copy /b succeeded');
-    try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true };
-  } catch (err) {
-    errors.push(`copy /b: ${err.message}`);
+    errors.push(`PowerShell P/Invoke: ${err.message}`);
     console.warn('[Hardware] Method 2 failed:', err.message);
   }
 
-  // Method 3: Use lpr command (available on Windows with LPR feature enabled)
+  // Method 3: copy /b to printer share (requires printer sharing)
   try {
-    console.log('[Hardware] Method 3: lpr command');
+    console.log('[Hardware] Method 3: copy /b to printer share');
+    execSync(`copy /b "${tmpFile}" "\\\\localhost\\${printerName}"`, {
+      timeout: 10000, encoding: 'utf-8', shell: 'cmd.exe', windowsHide: true,
+    });
+    console.log('[Hardware] Raw print via copy /b succeeded');
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true, method: 'copy-share' };
+  } catch (err) {
+    errors.push(`copy /b: ${err.message}`);
+    console.warn('[Hardware] Method 3 failed:', err.message);
+  }
+
+  // Method 4: print /d: command (basic Windows command, works on all versions)
+  try {
+    console.log('[Hardware] Method 4: print /d: command');
+    execSync(`print /d:"${printerName}" "${tmpFile}"`, {
+      timeout: 10000, encoding: 'utf-8', shell: 'cmd.exe', windowsHide: true,
+    });
+    console.log('[Hardware] Raw print via print /d: succeeded');
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true, method: 'print-d' };
+  } catch (err) {
+    errors.push(`print /d: ${err.message}`);
+    console.warn('[Hardware] Method 4 failed:', err.message);
+  }
+
+  // Method 5: Use lpr command (available on Windows with LPR feature enabled)
+  try {
+    console.log('[Hardware] Method 5: lpr command');
     execSync(`lpr -S localhost -P "${printerName}" -o l "${tmpFile}"`, {
-      timeout: 10000,
-      encoding: 'utf-8',
-      windowsHide: true,
+      timeout: 10000, encoding: 'utf-8', windowsHide: true,
     });
     console.log('[Hardware] Raw print via lpr succeeded');
     try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true };
+    return { success: true, method: 'lpr' };
   } catch (err) {
     errors.push(`lpr: ${err.message}`);
-    console.warn('[Hardware] Method 3 failed:', err.message);
+    console.warn('[Hardware] Method 5 failed:', err.message);
   }
 
   // All methods failed - clean up and throw
