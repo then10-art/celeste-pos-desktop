@@ -242,29 +242,38 @@ async function printReceipt(receiptData, paperSize) {
   const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
   console.log('[Hardware] printReceipt called, printerName:', printerName, 'type:', printerConfig.type, 'paperSize:', paperSize);
 
-  // Try raw ESC/POS first (best for thermal printers - sends binary commands directly)
+  // PRIMARY METHOD: Electron HTML print via webContents.print()
+  // This renders the receipt as HTML (with logo, images, styled text) and sends it
+  // silently to the thermal printer. Works on Windows 7+ with any printer driver.
+  if (printerName && mainWindowRef) {
+    try {
+      console.log('[Hardware] Trying Electron HTML print to:', printerName);
+      const result = await printViaSystem(receiptData, paperSize);
+      return { ...result, method: 'html-system', printerName };
+    } catch (err) {
+      console.warn('[Hardware] Electron HTML print failed:', err.message, '- trying raw ESC/POS');
+    }
+  }
+
+  // FALLBACK 1: Raw ESC/POS binary commands (no images, text-only)
   if (printerName && process.platform === 'win32') {
     try {
       console.log('[Hardware] Trying raw ESC/POS to:', printerName);
       const result = await printRawEscPos(receiptData, printerName);
       return { ...result, method: 'raw-escpos', printerName };
     } catch (err) {
-      console.warn('[Hardware] Raw ESC/POS failed:', err.message, '- trying HTML fallback');
+      console.warn('[Hardware] Raw ESC/POS failed:', err.message);
     }
   }
 
-  // Fallback: Try HTML-based system printing via webContents.print()
-  if (printerName || mainWindowRef) {
-    try {
-      const result = await printViaSystem(receiptData, paperSize);
-      return { ...result, method: 'html-system', printerName };
-    } catch (err) {
-      console.warn('[Hardware] System print failed, trying USB direct:', err.message);
-    }
+  // FALLBACK 2: direct USB ESC/POS
+  try {
+    return await printUsb(receiptData);
+  } catch (err) {
+    console.warn('[Hardware] USB print failed:', err.message);
   }
 
-  // Last resort: direct USB ESC/POS
-  return printUsb(receiptData);
+  throw new Error(`No se pudo imprimir. Impresora: ${printerName || 'no detectada'}. Verifique la conexión.`);
 }
 
 // ─── Raw ESC/POS via Windows Spooler ─────────────────────────────────────────
@@ -621,37 +630,75 @@ async function printViaSystem(receiptData, paperSize = '80') {
     printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Add a small delay to ensure CSS is fully applied and content is rendered
-      setTimeout(() => {
-        // Width: 80mm or 58mm in microns
-        // Height: use a large value to avoid pagination - thermal printers cut after content
-        const widthMicrons = paperSize === '58' ? 58000 : 80000;
-        const heightMicrons = 300000; // 300mm - thermal printers will cut at content end
+      // Wait for all images to load (logo, QR codes, etc.) before printing
+      const waitForImages = `
+        new Promise((resolve) => {
+          const imgs = document.querySelectorAll('img');
+          if (imgs.length === 0) return resolve();
+          let loaded = 0;
+          const check = () => { loaded++; if (loaded >= imgs.length) resolve(); };
+          imgs.forEach(img => {
+            if (img.complete) check();
+            else { img.onload = check; img.onerror = check; }
+          });
+          setTimeout(resolve, 3000); // Safety timeout for images
+        })
+      `;
 
-        console.log('[Hardware] Sending to printer:', printerName, 'pageSize:', widthMicrons, 'x', heightMicrons);
+      printWin.webContents.executeJavaScript(waitForImages).then(() => {
+        // Additional delay to ensure full rendering
+        setTimeout(() => {
+          // Width: 80mm or 58mm in microns
+          // Height: use a large value to avoid pagination - thermal printers cut after content
+          const widthMicrons = paperSize === '58' ? 58000 : 80000;
+          const heightMicrons = 300000; // 300mm - thermal printers will cut at content end
 
-        printWin.webContents.print(
-          {
-            silent: true,
-            printBackground: true,
-            deviceName: printerName,
-            margins: { marginType: 'none' },
-            pageSize: { width: widthMicrons, height: heightMicrons },
-          },
-          (success, failureReason) => {
-            printWin.close();
-            // Clean up temp file
-            try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-            if (success) {
-              console.log('[Hardware] Receipt printed successfully');
-              resolve({ success: true });
-            } else {
-              console.error('[Hardware] Print failed:', failureReason);
-              reject(new Error(failureReason || 'Print failed'));
+          console.log('[Hardware] Sending to printer:', printerName, 'pageSize:', widthMicrons, 'x', heightMicrons);
+
+          printWin.webContents.print(
+            {
+              silent: true,
+              printBackground: true,
+              deviceName: printerName,
+              margins: { marginType: 'none' },
+              pageSize: { width: widthMicrons, height: heightMicrons },
+            },
+            (success, failureReason) => {
+              printWin.close();
+              // Clean up temp file
+              try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+              if (success) {
+                console.log('[Hardware] Receipt printed successfully');
+                resolve({ success: true });
+              } else {
+                console.error('[Hardware] Print failed:', failureReason);
+                reject(new Error(failureReason || 'Print failed'));
+              }
             }
-          }
-        );
-      }, 500); // 500ms delay for rendering
+          );
+        }, 800); // 800ms delay for rendering after images load
+      }).catch(() => {
+        // If executeJavaScript fails, still try to print after delay
+        setTimeout(() => {
+          const widthMicrons = paperSize === '58' ? 58000 : 80000;
+          const heightMicrons = 300000;
+          printWin.webContents.print(
+            {
+              silent: true,
+              printBackground: true,
+              deviceName: printerName,
+              margins: { marginType: 'none' },
+              pageSize: { width: widthMicrons, height: heightMicrons },
+            },
+            (success, failureReason) => {
+              printWin.close();
+              try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+              if (success) resolve({ success: true });
+              else reject(new Error(failureReason || 'Print failed'));
+            }
+          );
+        }, 1500);
+      });
     });
 
     // Timeout safety
@@ -695,27 +742,31 @@ function convertReceiptDataToLines(data) {
     lines.push({ type: 'row', label: 'NCF:', value: data.ncfNumber });
   }
 
-  // Ticket info
-  lines.push({ type: 'subtitle', text: `RECIBO #${data.ticketNumber || ''}` });
+  // Ticket info (handle both old and new field names)
+  const ticketNum = data.ticketNumber || data.receiptNumber || '';
+  const cashier = data.cashierName || data.cashier || '';
+  lines.push({ type: 'subtitle', text: `RECIBO #${ticketNum}` });
   lines.push({ type: 'row', label: 'Fecha:', value: data.date || '' });
-  lines.push({ type: 'row', label: 'Cajero:', value: data.cashierName || '' });
+  lines.push({ type: 'row', label: 'Cajero:', value: cashier });
   if (data.customerName) lines.push({ type: 'row', label: 'Cliente:', value: data.customerName });
   if (data.customerRnc) lines.push({ type: 'row', label: 'RNC/Cédula:', value: data.customerRnc });
   lines.push({ type: 'divider' });
 
-  // Items
+  // Items (handle both old format: qty/price and new format: quantity/unitPrice)
   for (const item of (data.items || [])) {
-    const qty = item.isWeighed ? `${parseFloat(item.quantity).toFixed(3)}kg` : `${item.quantity}`;
-    const price = parseFloat(item.unitPrice || 0).toFixed(2);
-    const total = parseFloat(item.total || 0).toFixed(2);
+    const rawQty = item.quantity || item.qty || 1;
+    const rawPrice = item.unitPrice || item.price || 0;
+    const qty = item.isWeighed ? `${parseFloat(String(rawQty)).toFixed(3)}kg` : `${rawQty}`;
+    const price = parseFloat(String(rawPrice)).toFixed(2);
+    const total = parseFloat(String(item.total || 0)).toFixed(2);
     lines.push({ type: 'text', text: `${qty} x ${item.name}` });
     lines.push({ type: 'row', label: `  @${price}`, value: total });
   }
   lines.push({ type: 'divider' });
 
-  // Totals
+  // Totals (handle both old format: tax and new format: taxAmount)
   const subtotal = parseFloat(data.subtotal || 0).toFixed(2);
-  const tax = parseFloat(data.taxAmount || 0).toFixed(2);
+  const tax = parseFloat(data.taxAmount || data.tax || 0).toFixed(2);
   const total = parseFloat(data.total || 0).toFixed(2);
   lines.push({ type: 'row', label: 'Subtotal:', value: `RD$ ${subtotal}` });
   if (data.taxBreakdown) {
@@ -749,50 +800,98 @@ function convertReceiptDataToLines(data) {
 }
 
 // ─── Build Receipt HTML ──────────────────────────────────────────────────────
+// Uses TABLE-based layout (no flexbox) for maximum thermal printer compatibility.
+// Thermal printers on Windows 7 often fail to render flexbox/grid layouts.
 function buildReceiptHTML(receiptData, paperSize = '80') {
-  const width = paperSize === '58' ? '48mm' : '72mm';
+  const widthMM = paperSize === '58' ? '58mm' : '80mm';
+  const paddingMM = paperSize === '58' ? '1mm' : '2mm';
+  const maxLogo = paperSize === '58' ? '35mm' : '45mm';
   let body = '';
-  let lineCount = 0;
+
+  // Add logo at the top if available
+  const logoUrl = receiptData.logoUrl || receiptData.logo;
+  if (logoUrl) {
+    body += `<p style="text-align:center;margin:0 0 2mm 0"><img src="${escapeHtml(logoUrl)}" style="max-width:${maxLogo};max-height:18mm;display:inline-block" onerror="this.style.display='none'" /></p>`;
+  }
 
   // Convert ReceiptData format to lines if needed
   const normalized = convertReceiptDataToLines(receiptData);
   for (const line of (normalized.lines || [])) {
-    lineCount++;
     switch (line.type) {
       case 'title':
-        body += `<div style="text-align:center;font-weight:bold;font-size:14pt;margin:3mm 0">${escapeHtml(line.text)}</div>`;
+        body += `<p style="text-align:center;font-weight:bold;font-size:14pt;margin:2mm 0;line-height:1.2">${escapeHtml(line.text)}</p>`;
         break;
       case 'subtitle':
-        body += `<div style="text-align:center;font-weight:bold;font-size:10pt;margin:2mm 0">${escapeHtml(line.text)}</div>`;
+        body += `<p style="text-align:center;font-weight:bold;font-size:10pt;margin:1mm 0;line-height:1.2">${escapeHtml(line.text)}</p>`;
         break;
       case 'text': {
         const align = line.align === 'right' ? 'right' : line.align === 'center' ? 'center' : 'left';
-        body += `<div style="text-align:${align};font-size:9pt;margin:0.5mm 0">${escapeHtml(line.text)}</div>`;
+        body += `<p style="text-align:${align};font-size:9pt;margin:0.3mm 0;line-height:1.3">${escapeHtml(line.text)}</p>`;
         break;
       }
       case 'row':
-        body += `<div style="display:flex;justify-content:space-between;font-size:9pt;margin:0.5mm 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
+        // Use a TABLE for left-right alignment (no flexbox)
+        body += `<table style="width:100%;font-size:9pt;margin:0.3mm 0;border-collapse:collapse"><tr><td style="text-align:left;padding:0">${escapeHtml(line.label || '')}</td><td style="text-align:right;padding:0">${escapeHtml(line.value || '')}</td></tr></table>`;
         break;
       case 'bold-row':
-        body += `<div style="display:flex;justify-content:space-between;font-size:10pt;font-weight:bold;margin:1mm 0"><span>${escapeHtml(line.label || '')}</span><span>${escapeHtml(line.value || '')}</span></div>`;
+        body += `<table style="width:100%;font-size:10pt;font-weight:bold;margin:0.5mm 0;border-collapse:collapse"><tr><td style="text-align:left;padding:0">${escapeHtml(line.label || '')}</td><td style="text-align:right;padding:0">${escapeHtml(line.value || '')}</td></tr></table>`;
         break;
       case 'divider':
-        body += `<div style="border-top:1px dashed #000;margin:2mm 0"></div>`;
+        body += `<hr style="border:none;border-top:1px dashed #000;margin:1.5mm 0">`;
         break;
       case 'barcode':
-        body += `<div style="text-align:center;font-family:monospace;font-size:12pt;margin:2mm 0">*${escapeHtml(line.value || '')}*</div>`;
+        body += `<p style="text-align:center;font-family:monospace;font-size:12pt;margin:2mm 0">*${escapeHtml(line.value || '')}*</p>`;
         break;
       case 'spacer':
-        body += `<div style="height:4mm"></div>`;
+        body += `<p style="margin:2mm 0">&nbsp;</p>`;
         break;
     }
   }
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    @page { margin: 0; padding: 0; }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { width: 100%; margin: 0; padding: 2mm; font-family: 'Courier New', 'Lucida Console', monospace; font-size: 9pt; color: #000 !important; background: #fff !important; -webkit-print-color-adjust: exact; }
-  </style></head><body>${body}</body></html>`;
+  // Ultra-simple HTML: no flexbox, no grid, no complex CSS.
+  // Uses @page size matching the thermal paper width.
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page {
+  margin: 0;
+  padding: 0;
+  size: ${widthMM} auto;
+}
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html, body {
+  width: ${widthMM};
+  max-width: ${widthMM};
+  margin: 0;
+  padding: ${paddingMM};
+  font-family: 'Courier New', 'Lucida Console', monospace;
+  font-size: 9pt;
+  line-height: 1.3;
+  color: #000;
+  background: #fff;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+td {
+  padding: 0;
+  vertical-align: top;
+}
+</style>
+</head>
+<body>
+${body}
+</body>
+</html>`;
 }
 
 function escapeHtml(str) {
