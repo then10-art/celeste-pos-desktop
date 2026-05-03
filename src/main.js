@@ -15,6 +15,20 @@ try {
   autoUpdater = require('electron-updater').autoUpdater;
   autoUpdater.autoDownload = false; // Ask user before downloading
   autoUpdater.logger = null; // Suppress verbose logs in production
+  // Use user's temp directory to avoid EPERM on non-admin accounts
+  const os = require('os');
+  const pathModule = require('path');
+  const userTempDir = pathModule.join(os.tmpdir(), 'celeste-pos-updates');
+  try {
+    require('fs').mkdirSync(userTempDir, { recursive: true });
+    // electron-updater uses app.getPath('temp') internally, but we can set
+    // the download cache path to avoid permission issues
+    if (autoUpdater.downloadedUpdateHelper) {
+      autoUpdater.downloadedUpdateHelper._cacheDir = userTempDir;
+    }
+  } catch (dirErr) {
+    console.log('[Updater] Could not create temp dir:', dirErr.message);
+  }
   updaterAvailable = true;
 } catch (e) {
   console.log('[Updater] electron-updater not available:', e.message);
@@ -859,15 +873,43 @@ function setupAutoUpdater() {
 
   autoUpdater.on('error', (err) => {
     console.error('[Updater] Error:', err.message);
-    if (userTriggeredUpdateCheck) {
+    // Clear taskbar progress on error
+    if (mainWindow) mainWindow.setProgressBar(-1);
+
+    const isPermError = err.message && (err.message.includes('EPERM') || err.message.includes('EACCES') || err.message.includes('operation not permitted'));
+    
+    if (isPermError) {
+      // EPERM: the app doesn't have write permission to the temp folder
+      // Offer manual download instead of confusing the user
+      dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Permisos Insuficientes',
+        message: 'No se pudo descargar la actualización por falta de permisos.\n\nSoluciones:\n1. Cierre la aplicación, haga clic derecho y seleccione "Ejecutar como Administrador"\n2. O descargue la actualización manualmente desde el sitio web',
+        detail: err.message,
+        buttons: ['Descargar Manual', 'Cerrar'],
+        defaultId: 0
+      }).then(({ response }) => {
+        if (response === 0) {
+          const { shell } = require('electron');
+          shell.openExternal('https://celestepos.live/download');
+        }
+      });
+    } else if (userTriggeredUpdateCheck) {
       dialog.showMessageBox(mainWindow, {
         type: 'warning',
         title: 'Error de Actualización',
         message: `No se pudo verificar actualizaciones.\n\nAsegúrese de tener conexión a internet e intente de nuevo más tarde.`,
         detail: err.message,
+        buttons: ['Descargar Manual', 'Cerrar'],
+        defaultId: 1
+      }).then(({ response }) => {
+        if (response === 0) {
+          const { shell } = require('electron');
+          shell.openExternal('https://celestepos.live/download');
+        }
       });
-      userTriggeredUpdateCheck = false;
     }
+    userTriggeredUpdateCheck = false;
   });
 
   autoUpdater.on('download-progress', (progress) => {
