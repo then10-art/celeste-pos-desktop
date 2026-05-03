@@ -1188,7 +1188,7 @@ ipcMain.handle('set-print-mode', (event, mode) => {
 });
 
 ipcMain.handle('get-print-mode', () => {
-  return store.get('printMode') || 'gdi';
+  return store.get('printMode') || 'raw';
 });
 
 ipcMain.handle('save-label-printer', (event, printerName) => {
