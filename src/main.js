@@ -493,6 +493,10 @@ function buildAppMenu() {
           label: 'Test: GDI (como Eleventa)',
           click: () => testPrintGDI()
         },
+        {
+          label: 'Test: Etiqueta/Sticker',
+          click: () => testPrintLabel()
+        },
         { type: 'separator' },
         {
           label: 'Dispositivos Conectados',
@@ -1111,8 +1115,8 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
     const { BrowserWindow: BW } = require('electron');
     const printWin = new BW({
       show: false,
-      width: 400,
-      height: 400,
+      width: 800,
+      height: 600,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
@@ -1128,7 +1132,7 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             deviceName: printerName,
             margins: { marginType: 'none' },
             pageSize: { width: wMicrons, height: hMicrons },
-            scaleFactor: 100,
+            // Don't set scaleFactor — let the system auto-scale to fit the label
           },
           (success, failureReason) => {
             printWin.close();
@@ -1141,7 +1145,7 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             }
           }
         );
-      }, 800);
+      }, 1200); // Wait longer for images/barcodes to render
     });
 
     printWin.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
@@ -1501,7 +1505,7 @@ como metodo principal de impresion.
     fs.writeFileSync(tmpFile, html, 'utf-8');
 
     const printWin = new BW({
-      show: false, width: 302, height: 2000,
+      show: false, width: 800, height: 600,
       webPreferences: { nodeIntegration: false, contextIsolation: true }
     });
     printWin.loadFile(tmpFile);
@@ -1528,6 +1532,51 @@ como metodo principal de impresion.
     });
   } catch (err) {
     dialog.showErrorBox('Error GDI', `Fallo: ${err.message}`);
+  }
+}
+
+async function testPrintLabel() {
+  // Get label printer name - try labelPrinterName first, then receipt printer
+  const labelPrinter = store.get('labelPrinterName');
+  const receiptPrinter = store.get('printerConfig.printerName');
+  
+  if (!labelPrinter && !receiptPrinter) {
+    // Try to auto-detect
+    const printers = mainWindow?.webContents.getPrinters() || [];
+    const barcodePrinter = printers.find(p => p.name.includes('4BARCODE') || p.name.includes('4B-') || p.name.toLowerCase().includes('label'));
+    if (!barcodePrinter) {
+      dialog.showErrorBox('Error', 'No hay impresora de etiquetas configurada.\nConfigure una en la sección de Etiquetas del sistema.');
+      return;
+    }
+  }
+
+  const printerName = labelPrinter || receiptPrinter;
+  
+  // Show printer selection if multiple printers available
+  const printers = mainWindow?.webContents.getPrinters() || [];
+  const printerList = printers.map(p => p.name).join('\n');
+  
+  try {
+    const testLabel = {
+      productName: 'PRODUCTO PRUEBA',
+      price: 99.99,
+      barcode: '7501234567890',
+      storeName: store.get('tenantName') || 'SUPERMERCADO CELESTE',
+      date: new Date().toLocaleDateString('es-DO'),
+    };
+
+    console.log(`[Test Label] Printing to: ${printerName}`);
+    console.log(`[Test Label] Available printers: ${printerList}`);
+
+    const result = await printLabelGDI(testLabel, printerName, 37.3, 28.6);
+    
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Test Etiqueta',
+      message: `Etiqueta de prueba enviada a "${printerName}".\n\nSi la etiqueta sale en blanco, pruebe:\n1. Verificar que el papel esté del lado correcto\n2. Usar otra impresora de la lista:\n${printerList}`,
+    });
+  } catch (err) {
+    dialog.showErrorBox('Error Etiqueta', `Fallo al imprimir etiqueta: ${err.message}\n\nImpresoras disponibles:\n${printerList}`);
   }
 }
 

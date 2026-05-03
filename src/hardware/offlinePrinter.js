@@ -18,8 +18,6 @@ const path = require('path');
 const fs = require('fs');
 
 // ─── GDI Receipt Printing (Windows Driver - like Eleventa) ──────────────────
-// This creates a simple monospace text document and prints it through
-// the Windows printer driver. Works with ANY printer that has a driver installed.
 async function printReceiptGDI(receiptData, printerName, paperSize = '80') {
   if (!printerName) throw new Error('No printer configured');
 
@@ -64,7 +62,7 @@ pre {
 
 // ─── GDI Label Printing (Windows Driver) ────────────────────────────────────
 // Prints a product label using the Windows printer driver.
-// Simple text-based layout for maximum compatibility.
+// Uses pixel-based sizing for the BrowserWindow and mm-based for the print output.
 async function printLabelGDI(labelData, printerName, widthMm = 37.3, heightMm = 28.6) {
   if (!printerName) throw new Error('No label printer configured');
 
@@ -72,42 +70,105 @@ async function printLabelGDI(labelData, printerName, widthMm = 37.3, heightMm = 
 
   // Build label HTML - simple text layout optimized for small stickers
   const displayPrice = typeof price === 'number' ? `RD$${price.toFixed(2)}` : (price || '');
-  const displayName = (productName || '').substring(0, 20); // Truncate for small labels
+  const displayName = (productName || '').substring(0, 22); // Truncate for small labels
   const displayBarcode = barcode || '';
-  const displayStore = (storeName || '').substring(0, 18);
+  const displayStore = (storeName || '').substring(0, 20);
   const displayDate = date || new Date().toLocaleDateString('es-DO');
   const displayWeight = weight ? `${weight}${unit || 'kg'}` : '';
+
+  // Use a larger virtual page with explicit print-size CSS
+  // The key insight: the BrowserWindow renders at screen DPI (~96dpi)
+  // but the printer prints at its native DPI (usually 203dpi for thermal)
+  // We need the HTML to look correct at screen resolution, then
+  // the print system scales it to the label size.
+  
+  // Calculate pixel dimensions at 96 DPI for the label
+  const pxWidth = Math.round(widthMm * 96 / 25.4);  // ~141px for 37.3mm
+  const pxHeight = Math.round(heightMm * 96 / 25.4); // ~108px for 28.6mm
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page { margin: 0; size: ${widthMm}mm ${heightMm}mm; }
+@media print {
+  @page {
+    margin: 0;
+    size: ${widthMm}mm ${heightMm}mm;
+  }
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: 'Courier New', monospace;
+html, body {
   width: ${widthMm}mm;
   height: ${heightMm}mm;
-  padding: 1mm;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
   color: #000;
   background: #fff;
   -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
-.store { font-size: 6pt; text-align: center; font-weight: bold; }
-.name { font-size: 8pt; text-align: center; font-weight: bold; margin-top: 0.5mm; }
-.price { font-size: 14pt; text-align: center; font-weight: bold; margin-top: 1mm; }
-.weight { font-size: 7pt; text-align: center; }
-.barcode { font-size: 7pt; text-align: center; margin-top: 0.5mm; font-family: 'Free 3 of 9', 'Code 39', monospace; }
-.barcode-text { font-size: 6pt; text-align: center; }
-.date { font-size: 5pt; text-align: center; margin-top: 0.5mm; }
+.label {
+  width: ${widthMm}mm;
+  height: ${heightMm}mm;
+  padding: 1mm;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: Arial, Helvetica, sans-serif;
+  overflow: hidden;
+}
+.store {
+  font-size: 6pt;
+  text-align: center;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.name {
+  font-size: 7pt;
+  text-align: center;
+  font-weight: bold;
+  margin-top: 0.5mm;
+  line-height: 1.1;
+  max-height: 4mm;
+  overflow: hidden;
+}
+.price {
+  font-size: 16pt;
+  text-align: center;
+  font-weight: 900;
+  margin-top: 0.5mm;
+  line-height: 1;
+}
+.weight {
+  font-size: 6pt;
+  text-align: center;
+}
+.barcode-text {
+  font-size: 6pt;
+  text-align: center;
+  font-family: 'Courier New', monospace;
+  margin-top: 0.5mm;
+  letter-spacing: 1px;
+}
+.date {
+  font-size: 5pt;
+  text-align: center;
+  color: #333;
+}
 </style></head><body>
-<div class="store">${escapeHtml(displayStore)}</div>
-<div class="name">${escapeHtml(displayName)}</div>
-<div class="price">${escapeHtml(displayPrice)}</div>
-${displayWeight ? `<div class="weight">${escapeHtml(displayWeight)}</div>` : ''}
-<div class="barcode-text">${escapeHtml(displayBarcode)}</div>
-<div class="date">${escapeHtml(displayDate)}</div>
+<div class="label">
+  <div class="store">${escapeHtml(displayStore)}</div>
+  <div class="name">${escapeHtml(displayName)}</div>
+  <div class="price">${escapeHtml(displayPrice)}</div>
+  ${displayWeight ? `<div class="weight">${escapeHtml(displayWeight)}</div>` : ''}
+  <div class="barcode-text">${escapeHtml(displayBarcode)}</div>
+  <div class="date">${escapeHtml(displayDate)}</div>
+</div>
 </body></html>`;
+
+  console.log(`[LabelGDI] Printing: "${displayName}" @ ${displayPrice} to ${printerName} (${widthMm}x${heightMm}mm)`);
 
   return await printHTMLDocument(html, printerName, widthMm, heightMm);
 }
@@ -117,6 +178,8 @@ async function printLabelsGDI(labels, printerName, widthMm = 37.3, heightMm = 28
   if (!printerName) throw new Error('No label printer configured');
   if (!labels || labels.length === 0) throw new Error('No labels to print');
 
+  console.log(`[LabelGDI] Batch printing ${labels.length} label types to ${printerName}`);
+
   const results = [];
   for (const label of labels) {
     const copies = label.copies || 1;
@@ -124,12 +187,14 @@ async function printLabelsGDI(labels, printerName, widthMm = 37.3, heightMm = 28
       try {
         const result = await printLabelGDI(label, printerName, widthMm, heightMm);
         results.push({ success: true, product: label.productName });
+        console.log(`[LabelGDI] Printed: ${label.productName} (copy ${i + 1}/${copies})`);
       } catch (err) {
         results.push({ success: false, product: label.productName, error: err.message });
+        console.error(`[LabelGDI] Failed: ${label.productName}: ${err.message}`);
       }
       // Small delay between labels to avoid overwhelming the printer
       if (i < copies - 1 || labels.indexOf(label) < labels.length - 1) {
-        await new Promise(r => setTimeout(r, 300));
+        await new Promise(r => setTimeout(r, 500));
       }
     }
   }
@@ -142,19 +207,24 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
     const tmpFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.html`);
     fs.writeFileSync(tmpFile, html, 'utf-8');
 
+    // Use a LARGE BrowserWindow so the HTML renders at full fidelity
+    // The print system handles scaling to the actual paper size
     const printWin = new BrowserWindow({
       show: false,
-      width: Math.round(widthMm * 3.78) + 50, // mm to px approx
-      height: heightMm ? Math.round(heightMm * 3.78) + 50 : 2000,
+      width: 800,
+      height: 600,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
     printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
+      // Wait for fonts and content to fully render
       setTimeout(() => {
         const wMicrons = Math.round(widthMm * 1000);
         const hMicrons = heightMm ? Math.round(heightMm * 1000) : 300000;
+
+        console.log(`[GDI Print] Sending to ${printerName}: ${wMicrons}x${hMicrons} microns`);
 
         printWin.webContents.print({
           silent: true,
@@ -162,17 +232,19 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
           deviceName: printerName,
           margins: { marginType: 'none' },
           pageSize: { width: wMicrons, height: hMicrons },
-          scaleFactor: 100,
+          // Don't set scaleFactor — let the system auto-scale to fit
         }, (success, failureReason) => {
           printWin.close();
           try { fs.unlinkSync(tmpFile); } catch {}
           if (success) {
+            console.log('[GDI Print] Success');
             resolve({ success: true, method: 'gdi' });
           } else {
+            console.error('[GDI Print] Failed:', failureReason);
             reject(new Error(failureReason || 'GDI print failed'));
           }
         });
-      }, 800); // Wait for content to render
+      }, 1000); // Wait for content to render
     });
 
     printWin.webContents.on('did-fail-load', (_event, _code, desc) => {
