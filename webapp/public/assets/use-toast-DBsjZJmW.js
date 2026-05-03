@@ -1,1 +1,0 @@
-import{r as o}from"./index-DbRU31Pc.js";function i(){return{toast:o.useCallback(t=>{const e=t.title?`${t.title}: ${t.description}`:t.description;t.variant==="destructive"?console.error(e):console.log(e)},[])}}export{i as u};
