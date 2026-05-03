@@ -5,6 +5,8 @@
  *   - USB barcode scanners (HID - plug and play, keyboard emulation)
  *   - Cash drawers (via printer port RJ11)
  *   - Windows printer detection via Electron webContents.getPrinters()
+ * 
+ * Optimized for: AOKIA AK-3080 (80mm, USB, 250mm/s, ESC/POS)
  */
 
 let printerConfig = { type: 'usb', address: '', printerName: '' };
@@ -32,17 +34,18 @@ const RECEIPT_PRINTER_PATTERNS = [
   /barcode/i,
   /escpos/i,
   /esc[\s\/]pos/i,
+  /aokia/i,
+  /ak[\s-]?3080/i,
 ];
 
 // Second-tier: Epson inkjet/all-in-one printers that can be used for receipts
-// (e.g., Epson ET-4550, EPSON88489C, Epson L-series, etc.)
 const EPSON_INKJET_PATTERNS = [
-  /epson\s*et[\s-]?\d/i,       // Epson ET-4550, ET-2720, etc.
-  /epson\s*l[\s-]?\d/i,        // Epson L3150, L4160, etc.
-  /epson\s*wf[\s-]?\d/i,       // Epson WF-2830, WF-7710, etc.
-  /epson\s*xp[\s-]?\d/i,       // Epson XP-4100, etc.
-  /epson\s*\d{4,}/i,           // EPSON88489C and similar model codes
-  /epson/i,                     // Any Epson printer as last resort
+  /epson\s*et[\s-]?\d/i,
+  /epson\s*l[\s-]?\d/i,
+  /epson\s*wf[\s-]?\d/i,
+  /epson\s*xp[\s-]?\d/i,
+  /epson\s*\d{4,}/i,
+  /epson/i,
 ];
 
 // Printer names to exclude (regular document printers, fax, etc.)
@@ -69,14 +72,13 @@ async function setupHardware(config = {}, win = null) {
 
 // ─── Get Printer Status ──────────────────────────────────────────────────────
 async function getPrinterStatus() {
-  // If a specific printer is configured by name, check if it's in the system list
   if (printerConfig.printerName && mainWindowRef) {
     try {
       const printers = mainWindowRef.webContents.getPrinters();
       const configured = printers.find(p => p.name === printerConfig.printerName);
       if (configured) {
         return {
-          connected: configured.status === 0, // 0 = ready
+          connected: configured.status === 0,
           name: configured.name,
           type: printerConfig.type || 'usb',
         };
@@ -84,7 +86,6 @@ async function getPrinterStatus() {
     } catch { /* fall through */ }
   }
 
-  // Auto-detect: find the first receipt printer in the system
   if (mainWindowRef) {
     try {
       const printers = mainWindowRef.webContents.getPrinters();
@@ -99,7 +100,6 @@ async function getPrinterStatus() {
     } catch { /* fall through */ }
   }
 
-  // Fallback: try USB device detection via node-hid
   try {
     const HID = require('node-hid');
     const hidDevices = HID.devices();
@@ -120,7 +120,6 @@ async function getPrinterStatus() {
 
 // ─── Find Receipt Printer from System Printers ──────────────────────────────
 function findReceiptPrinter(printers) {
-  // First pass: look for known receipt/thermal/POS printer patterns
   for (const p of printers) {
     if (EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) continue;
     if (RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name))) {
@@ -128,15 +127,12 @@ function findReceiptPrinter(printers) {
     }
   }
 
-  // Second pass: look for USB Receipt Printer (generic name)
   for (const p of printers) {
     if (p.name.toLowerCase().includes('usb') && !EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) {
       return p;
     }
   }
 
-  // Third pass: look for Epson inkjet/all-in-one printers (ET-4550, L-series, etc.)
-  // These can print receipts via the system printer dialog (not ESC/POS)
   for (const p of printers) {
     if (EXCLUDED_PATTERNS.some(rx => rx.test(p.name))) continue;
     if (EPSON_INKJET_PATTERNS.some(rx => rx.test(p.name))) {
@@ -151,7 +147,6 @@ function findReceiptPrinter(printers) {
 async function getAvailablePrinters() {
   const result = [];
 
-  // System printers via Electron API
   if (mainWindowRef) {
     try {
       const printers = mainWindowRef.webContents.getPrinters();
@@ -179,7 +174,6 @@ async function getAvailablePrinters() {
 async function getConnectedDevices() {
   const devices = [];
 
-  // System printers via Electron
   if (mainWindowRef) {
     try {
       const printers = mainWindowRef.webContents.getPrinters();
@@ -195,7 +189,6 @@ async function getConnectedDevices() {
     } catch { /* ignore */ }
   }
 
-  // USB HID devices
   try {
     const HID = require('node-hid');
     const hidDevices = HID.devices();
@@ -207,7 +200,6 @@ async function getConnectedDevices() {
     }
   } catch { /* node-hid optional */ }
 
-  // Serial ports
   try {
     const { SerialPort } = require('serialport');
     const ports = await SerialPort.list();
@@ -218,7 +210,6 @@ async function getConnectedDevices() {
     }
   } catch { /* serialport optional */ }
 
-  // Barcode scanners (HID keyboard emulation)
   try {
     const HID = require('node-hid');
     const hidDevices = HID.devices();
@@ -234,39 +225,44 @@ async function getConnectedDevices() {
 }
 
 // ─── Print Receipt ────────────────────────────────────────────────────────────
+// STRATEGY: For ESC/POS thermal printers (like AOKIA AK-3080), raw ESC/POS
+// commands are the ONLY reliable method. Electron's webContents.print() produces
+// blank pages on most USB thermal printers because the Windows GDI driver doesn't
+// properly render HTML content for these devices.
 async function printReceipt(receiptData, paperSize) {
   if (printerConfig.type === 'network') return printNetwork(receiptData);
   if (printerConfig.type === 'serial')  return printSerial(receiptData);
 
-  // Determine printer name
   const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
   console.log('[Hardware] printReceipt called, printerName:', printerName, 'type:', printerConfig.type, 'paperSize:', paperSize);
 
-  // PRIMARY METHOD: Electron HTML print via webContents.print()
-  // This renders the receipt as HTML (with logo, images, styled text) and sends it
-  // silently to the thermal printer. Works on Windows 7+ with any printer driver.
+  // PRIMARY METHOD: Raw ESC/POS binary commands
+  // This is the most reliable method for USB thermal receipt printers.
+  // It bypasses the Windows GDI rendering pipeline entirely and sends
+  // raw binary commands directly to the printer hardware.
+  if (printerName && process.platform === 'win32') {
+    try {
+      console.log('[Hardware] PRIMARY: Raw ESC/POS to:', printerName);
+      const result = await printRawEscPos(receiptData, printerName, paperSize);
+      return { ...result, method: 'raw-escpos', printerName };
+    } catch (err) {
+      console.warn('[Hardware] Raw ESC/POS failed:', err.message, '- trying HTML system print');
+    }
+  }
+
+  // FALLBACK 1: Electron HTML print via webContents.print()
+  // Only used if raw ESC/POS fails (e.g., for inkjet printers that need HTML rendering)
   if (printerName && mainWindowRef) {
     try {
-      console.log('[Hardware] Trying Electron HTML print to:', printerName);
+      console.log('[Hardware] FALLBACK: Electron HTML print to:', printerName);
       const result = await printViaSystem(receiptData, paperSize);
       return { ...result, method: 'html-system', printerName };
     } catch (err) {
-      console.warn('[Hardware] Electron HTML print failed:', err.message, '- trying raw ESC/POS');
+      console.warn('[Hardware] Electron HTML print failed:', err.message);
     }
   }
 
-  // FALLBACK 1: Raw ESC/POS binary commands (no images, text-only)
-  if (printerName && process.platform === 'win32') {
-    try {
-      console.log('[Hardware] Trying raw ESC/POS to:', printerName);
-      const result = await printRawEscPos(receiptData, printerName);
-      return { ...result, method: 'raw-escpos', printerName };
-    } catch (err) {
-      console.warn('[Hardware] Raw ESC/POS failed:', err.message);
-    }
-  }
-
-  // FALLBACK 2: direct USB ESC/POS
+  // FALLBACK 2: direct USB ESC/POS via node-escpos
   try {
     return await printUsb(receiptData);
   } catch (err) {
@@ -278,9 +274,9 @@ async function printReceipt(receiptData, paperSize) {
 
 // ─── Raw ESC/POS via Windows Spooler ─────────────────────────────────────────
 // Builds ESC/POS binary commands and sends them directly to the printer
-// via Windows print spooler (bypasses webContents.print() which causes blank pages)
-// Optimized for Windows 7 compatibility
-async function printRawEscPos(receiptData, printerName) {
+// via Windows print spooler. This is the ONLY reliable method for thermal
+// printers like AOKIA AK-3080.
+async function printRawEscPos(receiptData, printerName, paperSize) {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
@@ -291,14 +287,19 @@ async function printRawEscPos(receiptData, printerName) {
   const lines = normalized.lines || [];
   console.log('[Hardware] Converting receipt to ESC/POS, lines:', lines.length);
 
+  // Determine column width based on paper size (80mm = 42 chars, 58mm = 32 chars)
+  const maxCols = (paperSize === '58') ? 32 : 42;
+
   // Build ESC/POS binary commands
   const ESC = 0x1B;
   const GS = 0x1D;
   const LF = 0x0A;
   const buffers = [];
 
-  // Initialize printer
-  buffers.push(Buffer.from([ESC, 0x40])); // ESC @ - Initialize
+  // Initialize printer - CRITICAL: must send init command first
+  buffers.push(Buffer.from([ESC, 0x40])); // ESC @ - Initialize/Reset printer
+  // Small delay equivalent - send a few null bytes to let printer reset
+  buffers.push(Buffer.from([0x00, 0x00]));
   buffers.push(Buffer.from([ESC, 0x74, 0x10])); // ESC t 16 - Set code page to WPC1252
 
   for (const line of lines) {
@@ -328,8 +329,10 @@ async function printRawEscPos(receiptData, printerName) {
       }
       case 'row': {
         buffers.push(Buffer.from([ESC, 0x61, 0x00])); // Left align
-        const label = (line.label || '').substring(0, 24).padEnd(24);
-        const value = (line.value || '').substring(0, 18).padStart(18);
+        const labelMaxLen = Math.floor(maxCols * 0.55);
+        const valueMaxLen = maxCols - labelMaxLen;
+        const label = (line.label || '').substring(0, labelMaxLen).padEnd(labelMaxLen);
+        const value = (line.value || '').substring(0, valueMaxLen).padStart(valueMaxLen);
         buffers.push(Buffer.from(encodeText(label + value)));
         buffers.push(Buffer.from([LF]));
         break;
@@ -337,8 +340,10 @@ async function printRawEscPos(receiptData, printerName) {
       case 'bold-row': {
         buffers.push(Buffer.from([ESC, 0x61, 0x00])); // Left align
         buffers.push(Buffer.from([ESC, 0x45, 0x01])); // Bold on
-        const label = (line.label || '').substring(0, 24).padEnd(24);
-        const value = (line.value || '').substring(0, 18).padStart(18);
+        const labelMaxLen = Math.floor(maxCols * 0.55);
+        const valueMaxLen = maxCols - labelMaxLen;
+        const label = (line.label || '').substring(0, labelMaxLen).padEnd(labelMaxLen);
+        const value = (line.value || '').substring(0, valueMaxLen).padStart(valueMaxLen);
         buffers.push(Buffer.from(encodeText(label + value)));
         buffers.push(Buffer.from([LF]));
         buffers.push(Buffer.from([ESC, 0x45, 0x00])); // Bold off
@@ -346,7 +351,7 @@ async function printRawEscPos(receiptData, printerName) {
       }
       case 'divider':
         buffers.push(Buffer.from([ESC, 0x61, 0x00])); // Left align
-        buffers.push(Buffer.from(encodeText('-'.repeat(42))));
+        buffers.push(Buffer.from(encodeText('-'.repeat(maxCols))));
         buffers.push(Buffer.from([LF]));
         break;
       case 'spacer':
@@ -355,104 +360,39 @@ async function printRawEscPos(receiptData, printerName) {
     }
   }
 
-  // Feed and cut
-  buffers.push(Buffer.from([LF, LF, LF])); // Feed 3 lines
-  buffers.push(Buffer.from([GS, 0x56, 0x00])); // Full cut
-
-  // Open cash drawer (ESC p 0 25 25)
-  buffers.push(Buffer.from([0x1B, 0x70, 0x00, 0x19, 0x19]));
+  // Feed paper and cut
+  buffers.push(Buffer.from([LF, LF, LF, LF])); // Feed 4 lines for clearance
+  buffers.push(Buffer.from([GS, 0x56, 0x41, 0x03])); // GS V A 3 - Partial cut with 3 lines feed
 
   // Combine all buffers
   const rawData = Buffer.concat(buffers);
   console.log('[Hardware] Built ESC/POS data:', rawData.length, 'bytes for', lines.length, 'lines');
 
+  // Send raw data to printer via Windows spooler
+  return await sendRawToPrinter(rawData, printerName);
+}
+
+// ─── Send Raw Bytes to Printer (shared by print and cash drawer) ─────────────
+// Tries multiple Windows methods to send raw binary data to the printer.
+// This is used by both printRawEscPos() and openCashDrawer().
+async function sendRawToPrinter(rawData, printerName) {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const { execSync } = require('child_process');
+
   // Write to temp file
-  const tmpFile = path.join(os.tmpdir(), `celeste-receipt-${Date.now()}.bin`);
+  const tmpFile = path.join(os.tmpdir(), `celeste-raw-${Date.now()}.bin`);
   fs.writeFileSync(tmpFile, rawData);
 
-  // Try multiple methods to send raw data to the printer
   const errors = [];
   const safePrinterName = printerName.replace(/'/g, "''");
   const safeTmpFile = tmpFile.replace(/\\/g, '\\\\');
 
-  // Method 0: NET USE + COPY (most reliable on Windows 7)
-  // Maps the printer to a local port, copies the raw data, then unmaps
+  // Method 0: PowerShell RawPrinter P/Invoke (most reliable on Win8+)
+  // This opens the printer handle directly and writes raw bytes - bypasses all rendering
   try {
-    console.log('[Hardware] Method 0: NET USE LPT3 + COPY /B');
-    // First try to release LPT3 if already mapped
-    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
-    // Map printer to LPT3
-    execSync(`net use LPT3: "\\\\localhost\\${printerName}" /persistent:no`, {
-      timeout: 8000, shell: 'cmd.exe', windowsHide: true,
-    });
-    // Copy raw data to the mapped port
-    execSync(`copy /b "${tmpFile}" LPT3:`, {
-      timeout: 10000, shell: 'cmd.exe', windowsHide: true,
-    });
-    // Cleanup
-    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
-    console.log('[Hardware] Raw print via NET USE + COPY succeeded');
-    try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true, method: 'net-use-copy' };
-  } catch (err) {
-    errors.push(`NET USE: ${err.message}`);
-    console.warn('[Hardware] Method 0 failed:', err.message);
-    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
-  }
-
-  // Method 1: PowerShell with .NET WMI (simpler than Add-Type, works on PS 2.0+)
-  try {
-    console.log('[Hardware] Method 1: PowerShell WMI raw print');
-    // Use a simpler PowerShell approach that doesn't require Add-Type compilation
-    const psScript = `
-$ErrorActionPreference = 'Stop'
-$printerName = '${safePrinterName}'
-$filePath = '${safeTmpFile}'
-try {
-  # Try using .NET Framework directly (available on all Windows versions)
-  $bytes = [System.IO.File]::ReadAllBytes($filePath)
-  # Open printer handle via winspool.drv through reflection
-  $winspool = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
-  # Fallback: write to printer port file
-  $printer = Get-WmiObject -Query "SELECT * FROM Win32_Printer WHERE Name='$($printerName -replace "'","''")'"
-  if ($printer -and $printer.PortName) {
-    $port = $printer.PortName
-    if ($port -match '^(COM|LPT)') {
-      # Direct port access
-      [System.IO.File]::WriteAllBytes($port, $bytes)
-      Write-Output 'OK-PORT'
-    } elseif ($port -match '^USB') {
-      # USB port - try spooler
-      $printJob = $printer.PSBase.InvokeMethod('PrintTestPage', $null)
-      throw 'USB port requires spooler method'
-    } else {
-      throw "Unknown port type: $port"
-    }
-  } else {
-    throw 'Printer not found via WMI'
-  }
-} catch {
-  Write-Error $_.Exception.Message
-  exit 1
-}
-`;
-    const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
-    fs.writeFileSync(psFile, psScript, 'utf-8');
-    const result = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, {
-      timeout: 15000, encoding: 'utf-8', windowsHide: true,
-    });
-    console.log('[Hardware] Raw print via PowerShell WMI succeeded:', result.trim());
-    try { fs.unlinkSync(psFile); } catch { }
-    try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true, method: 'ps-wmi' };
-  } catch (err) {
-    errors.push(`PowerShell WMI: ${err.message}`);
-    console.warn('[Hardware] Method 1 failed:', err.message);
-  }
-
-  // Method 2: PowerShell RawPrinter P/Invoke (works on PS 3.0+ / Win8+)
-  try {
-    console.log('[Hardware] Method 2: PowerShell RawPrinter P/Invoke');
+    console.log('[Hardware] Method 0: PowerShell RawPrinter P/Invoke');
     const psScript = `
 $ErrorActionPreference = 'Stop'
 $printerName = '${safePrinterName}'
@@ -473,20 +413,20 @@ public class RawPrinterHelper {
   public static bool SendRaw(string printer, byte[] data) {
     IntPtr hPrinter; int written;
     if (!OpenPrinter(printer, out hPrinter, IntPtr.Zero)) return false;
-    var di = new DOCINFOA() { pDocName = "CelestePOS", pOutputFile = null, pDatatype = "RAW" };
+    var di = new DOCINFOA() { pDocName = "CelestePOS Receipt", pOutputFile = null, pDatatype = "RAW" };
     try {
-      StartDocPrinter(hPrinter, 1, ref di);
-      StartPagePrinter(hPrinter);
-      WritePrinter(hPrinter, data, data.Length, out written);
+      if (!StartDocPrinter(hPrinter, 1, ref di)) { ClosePrinter(hPrinter); return false; }
+      if (!StartPagePrinter(hPrinter)) { EndDocPrinter(hPrinter); ClosePrinter(hPrinter); return false; }
+      bool ok = WritePrinter(hPrinter, data, data.Length, out written);
       EndPagePrinter(hPrinter);
       EndDocPrinter(hPrinter);
+      return ok && written == data.Length;
     } finally { ClosePrinter(hPrinter); }
-    return written == data.Length;
   }
 }
 "@
 $ok = [RawPrinterHelper]::SendRaw($printerName, $bytes)
-if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
+if ($ok) { Write-Output 'OK' } else { throw 'WritePrinter failed - check printer name and connection' }
 `;
     const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
     fs.writeFileSync(psFile, psScript, 'utf-8');
@@ -499,12 +439,32 @@ if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
     return { success: true, method: 'ps-pinvoke' };
   } catch (err) {
     errors.push(`PowerShell P/Invoke: ${err.message}`);
-    console.warn('[Hardware] Method 2 failed:', err.message);
+    console.warn('[Hardware] Method 0 failed:', err.message);
   }
 
-  // Method 3: copy /b to printer share (requires printer sharing)
+  // Method 1: NET USE + COPY (most reliable on Windows 7)
   try {
-    console.log('[Hardware] Method 3: copy /b to printer share');
+    console.log('[Hardware] Method 1: NET USE LPT3 + COPY /B');
+    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+    execSync(`net use LPT3: "\\\\localhost\\${printerName}" /persistent:no`, {
+      timeout: 8000, shell: 'cmd.exe', windowsHide: true,
+    });
+    execSync(`copy /b "${tmpFile}" LPT3:`, {
+      timeout: 10000, shell: 'cmd.exe', windowsHide: true,
+    });
+    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+    console.log('[Hardware] Raw print via NET USE + COPY succeeded');
+    try { fs.unlinkSync(tmpFile); } catch { }
+    return { success: true, method: 'net-use-copy' };
+  } catch (err) {
+    errors.push(`NET USE: ${err.message}`);
+    console.warn('[Hardware] Method 1 failed:', err.message);
+    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+  }
+
+  // Method 2: copy /b to printer share (requires printer sharing enabled)
+  try {
+    console.log('[Hardware] Method 2: copy /b to printer share');
     execSync(`copy /b "${tmpFile}" "\\\\localhost\\${printerName}"`, {
       timeout: 10000, encoding: 'utf-8', shell: 'cmd.exe', windowsHide: true,
     });
@@ -513,12 +473,12 @@ if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
     return { success: true, method: 'copy-share' };
   } catch (err) {
     errors.push(`copy /b: ${err.message}`);
-    console.warn('[Hardware] Method 3 failed:', err.message);
+    console.warn('[Hardware] Method 2 failed:', err.message);
   }
 
-  // Method 4: print /d: command (basic Windows command, works on all versions)
+  // Method 3: print /d: command
   try {
-    console.log('[Hardware] Method 4: print /d: command');
+    console.log('[Hardware] Method 3: print /d: command');
     execSync(`print /d:"${printerName}" "${tmpFile}"`, {
       timeout: 10000, encoding: 'utf-8', shell: 'cmd.exe', windowsHide: true,
     });
@@ -527,12 +487,12 @@ if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
     return { success: true, method: 'print-d' };
   } catch (err) {
     errors.push(`print /d: ${err.message}`);
-    console.warn('[Hardware] Method 4 failed:', err.message);
+    console.warn('[Hardware] Method 3 failed:', err.message);
   }
 
-  // Method 5: Use lpr command (available on Windows with LPR feature enabled)
+  // Method 4: lpr command (available with LPR feature enabled)
   try {
-    console.log('[Hardware] Method 5: lpr command');
+    console.log('[Hardware] Method 4: lpr command');
     execSync(`lpr -S localhost -P "${printerName}" -o l "${tmpFile}"`, {
       timeout: 10000, encoding: 'utf-8', windowsHide: true,
     });
@@ -541,10 +501,10 @@ if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
     return { success: true, method: 'lpr' };
   } catch (err) {
     errors.push(`lpr: ${err.message}`);
-    console.warn('[Hardware] Method 5 failed:', err.message);
+    console.warn('[Hardware] Method 4 failed:', err.message);
   }
 
-  // All methods failed - clean up and throw
+  // All methods failed
   try { fs.unlinkSync(tmpFile); } catch { }
   const errMsg = `All raw print methods failed: ${errors.join(' | ')}`;
   console.error('[Hardware]', errMsg);
@@ -553,14 +513,12 @@ if ($ok) { 'OK' } else { throw 'WritePrinter failed' }
 
 // Encode text to Windows-1252 compatible bytes (handles Spanish characters)
 function encodeText(text) {
-  // Map common Spanish/special chars to Windows-1252 byte values
   const result = [];
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
     if (code < 128) {
       result.push(code);
     } else {
-      // Common Spanish characters in Windows-1252
       const map = {
         0xe1: 0xe1, // á
         0xe9: 0xe9, // é
@@ -590,14 +548,13 @@ function encodeText(text) {
 }
 
 // ─── System Printer (Windows GDI) - FALLBACK ─────────────────────────────────
-// Uses Electron's webContents.print() - kept as fallback if raw printing fails
+// Uses Electron's webContents.print() - kept as fallback for inkjet printers
 async function printViaSystem(receiptData, paperSize = '80') {
   if (!mainWindowRef) throw new Error('No window reference');
 
   const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
   if (!printerName) throw new Error('No receipt printer found');
 
-  // Build simple HTML receipt for system printing
   console.log('[Hardware] Receipt data received:', JSON.stringify({
     storeName: receiptData.storeName,
     itemCount: (receiptData.items || []).length,
@@ -608,7 +565,6 @@ async function printViaSystem(receiptData, paperSize = '80') {
   const html = buildReceiptHTML(receiptData, paperSize);
   console.log('[Hardware] Printing receipt to:', printerName, 'paperSize:', paperSize, 'htmlLength:', html.length);
 
-  // Write HTML to a temp file to avoid data: URL encoding issues
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
@@ -617,7 +573,6 @@ async function printViaSystem(receiptData, paperSize = '80') {
   console.log('[Hardware] Wrote receipt HTML to:', tmpFile);
 
   return new Promise((resolve, reject) => {
-    // Create a hidden window for printing
     const { BrowserWindow } = require('electron');
     const printWin = new BrowserWindow({
       show: false,
@@ -626,11 +581,9 @@ async function printViaSystem(receiptData, paperSize = '80') {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
-    // Load from file:// instead of data: URL for reliable rendering
     printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Wait for all images to load (logo, QR codes, etc.) before printing
       const waitForImages = `
         new Promise((resolve) => {
           const imgs = document.querySelectorAll('img');
@@ -641,17 +594,14 @@ async function printViaSystem(receiptData, paperSize = '80') {
             if (img.complete) check();
             else { img.onload = check; img.onerror = check; }
           });
-          setTimeout(resolve, 3000); // Safety timeout for images
+          setTimeout(resolve, 3000);
         })
       `;
 
       printWin.webContents.executeJavaScript(waitForImages).then(() => {
-        // Additional delay to ensure full rendering
         setTimeout(() => {
-          // Width: 80mm or 58mm in microns
-          // Height: use a large value to avoid pagination - thermal printers cut after content
           const widthMicrons = paperSize === '58' ? 58000 : 80000;
-          const heightMicrons = 300000; // 300mm - thermal printers will cut at content end
+          const heightMicrons = 300000;
 
           console.log('[Hardware] Sending to printer:', printerName, 'pageSize:', widthMicrons, 'x', heightMicrons);
 
@@ -665,7 +615,6 @@ async function printViaSystem(receiptData, paperSize = '80') {
             },
             (success, failureReason) => {
               printWin.close();
-              // Clean up temp file
               try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
               if (success) {
                 console.log('[Hardware] Receipt printed successfully');
@@ -676,9 +625,8 @@ async function printViaSystem(receiptData, paperSize = '80') {
               }
             }
           );
-        }, 800); // 800ms delay for rendering after images load
+        }, 800);
       }).catch(() => {
-        // If executeJavaScript fails, still try to print after delay
         setTimeout(() => {
           const widthMicrons = paperSize === '58' ? 58000 : 80000;
           const heightMicrons = 300000;
@@ -701,7 +649,6 @@ async function printViaSystem(receiptData, paperSize = '80') {
       });
     });
 
-    // Timeout safety
     setTimeout(() => {
       try { printWin.close(); } catch { /* ignore */ }
       try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
@@ -723,10 +670,9 @@ async function getAutoDetectedPrinterName() {
 }
 
 // ─── Convert ReceiptData to lines format ─────────────────────────────────────
-// The web app sends rich ReceiptData objects; convert them to the simple lines[] format
 function convertReceiptDataToLines(data) {
-  if (data.lines) return data; // Already in lines format
-  if (!data.storeName && !data.items) return data; // Unknown format, pass through
+  if (data.lines) return data;
+  if (!data.storeName && !data.items) return data;
 
   const lines = [];
   // Header
@@ -742,7 +688,7 @@ function convertReceiptDataToLines(data) {
     lines.push({ type: 'row', label: 'NCF:', value: data.ncfNumber });
   }
 
-  // Ticket info (handle both old and new field names)
+  // Ticket info
   const ticketNum = data.ticketNumber || data.receiptNumber || '';
   const cashier = data.cashierName || data.cashier || '';
   lines.push({ type: 'subtitle', text: `RECIBO #${ticketNum}` });
@@ -752,7 +698,7 @@ function convertReceiptDataToLines(data) {
   if (data.customerRnc) lines.push({ type: 'row', label: 'RNC/Cédula:', value: data.customerRnc });
   lines.push({ type: 'divider' });
 
-  // Items (handle both old format: qty/price and new format: quantity/unitPrice)
+  // Items
   for (const item of (data.items || [])) {
     const rawQty = item.quantity || item.qty || 1;
     const rawPrice = item.unitPrice || item.price || 0;
@@ -764,7 +710,7 @@ function convertReceiptDataToLines(data) {
   }
   lines.push({ type: 'divider' });
 
-  // Totals (handle both old format: tax and new format: taxAmount)
+  // Totals
   const subtotal = parseFloat(data.subtotal || 0).toFixed(2);
   const tax = parseFloat(data.taxAmount || data.tax || 0).toFixed(2);
   const total = parseFloat(data.total || 0).toFixed(2);
@@ -800,21 +746,17 @@ function convertReceiptDataToLines(data) {
 }
 
 // ─── Build Receipt HTML ──────────────────────────────────────────────────────
-// Uses TABLE-based layout (no flexbox) for maximum thermal printer compatibility.
-// Thermal printers on Windows 7 often fail to render flexbox/grid layouts.
 function buildReceiptHTML(receiptData, paperSize = '80') {
   const widthMM = paperSize === '58' ? '58mm' : '80mm';
   const paddingMM = paperSize === '58' ? '1mm' : '2mm';
   const maxLogo = paperSize === '58' ? '35mm' : '45mm';
   let body = '';
 
-  // Add logo at the top if available
   const logoUrl = receiptData.logoUrl || receiptData.logo;
   if (logoUrl) {
     body += `<p style="text-align:center;margin:0 0 2mm 0"><img src="${escapeHtml(logoUrl)}" style="max-width:${maxLogo};max-height:18mm;display:inline-block" onerror="this.style.display='none'" /></p>`;
   }
 
-  // Convert ReceiptData format to lines if needed
   const normalized = convertReceiptDataToLines(receiptData);
   for (const line of (normalized.lines || [])) {
     switch (line.type) {
@@ -830,7 +772,6 @@ function buildReceiptHTML(receiptData, paperSize = '80') {
         break;
       }
       case 'row':
-        // Use a TABLE for left-right alignment (no flexbox)
         body += `<table style="width:100%;font-size:9pt;margin:0.3mm 0;border-collapse:collapse"><tr><td style="text-align:left;padding:0">${escapeHtml(line.label || '')}</td><td style="text-align:right;padding:0">${escapeHtml(line.value || '')}</td></tr></table>`;
         break;
       case 'bold-row':
@@ -848,8 +789,6 @@ function buildReceiptHTML(receiptData, paperSize = '80') {
     }
   }
 
-  // Ultra-simple HTML: no flexbox, no grid, no complex CSS.
-  // Uses @page size matching the thermal paper width.
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -898,7 +837,7 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// ─── USB Printing (ESC/POS direct) ───────────────────────────────────────────
+// ─── USB Printing (ESC/POS direct via node-escpos) ───────────────────────────
 async function printUsb(receiptData) {
   const { Printer } = require('@node-escpos/core');
   const USB = require('@node-escpos/usb-adapter');
@@ -949,9 +888,10 @@ async function printSerial(receiptData) {
   });
 }
 
-// ─── ESC/POS Receipt Builder ──────────────────────────────────────────────────
+// ─── ESC/POS Receipt Builder (for node-escpos library) ───────────────────────
 async function buildEscPosReceipt(printer, receiptData) {
-  for (const line of (receiptData.lines || [])) {
+  const normalized = convertReceiptDataToLines(receiptData);
+  for (const line of (normalized.lines || [])) {
     switch (line.type) {
       case 'title':
         printer.align('ct').style('bu').size(1, 1).text(line.text);
@@ -990,39 +930,66 @@ async function buildEscPosReceipt(printer, receiptData) {
 }
 
 // ─── Open Cash Drawer ─────────────────────────────────────────────────────────
-// Standard ESC/POS cash drawer kick: ESC p m t1 t2
-const CASH_DRAWER_CMD = Buffer.from([0x1b, 0x70, 0x00, 0x19, 0x19]);
-
+// Standard ESC/POS cash drawer kick command: ESC p m t1 t2
+// Pin 2 (m=0): ESC p 0 25 250 — pulse pin 2 for 50ms on, 500ms off
+// Pin 5 (m=1): ESC p 1 25 250 — pulse pin 5 for 50ms on, 500ms off
+// The AOKIA AK-3080 has a standard RJ11 cash drawer port.
+// We send BOTH pin commands to ensure compatibility with all cash drawers.
 async function openCashDrawer() {
+  const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
+  console.log('[Hardware] openCashDrawer called, printerName:', printerName);
+
+  // Build cash drawer kick commands
+  // ESC p 0 25 250 - Kick pin 2 (most common)
+  // ESC p 1 25 250 - Kick pin 5 (backup)
+  const drawerCmd = Buffer.from([
+    0x1B, 0x70, 0x00, 0x19, 0xFA,  // ESC p 0 25 250 (pin 2, 50ms on, 500ms off)
+    0x1B, 0x70, 0x01, 0x19, 0xFA,  // ESC p 1 25 250 (pin 5, 50ms on, 500ms off)
+  ]);
+
+  // For network printers, send directly via TCP
   if (printerConfig.type === 'network') {
     const net = require('net');
     const [host, portStr] = (printerConfig.address || '').split(':');
     const port = parseInt(portStr) || 9100;
     return new Promise((resolve, reject) => {
       const socket = net.createConnection(port, host, () => {
-        socket.write(CASH_DRAWER_CMD, () => { socket.destroy(); resolve({ success: true }); });
+        socket.write(drawerCmd, () => { socket.destroy(); resolve({ success: true }); });
       });
-      socket.on('error', reject);
+      socket.on('error', (err) => reject(new Error(`Cash drawer network error: ${err.message}`)));
       setTimeout(() => { socket.destroy(); reject(new Error('Timeout')); }, 3000);
     });
   }
 
-  // USB fallback
+  // For USB printers on Windows: send raw command through the printer spooler
+  // This is the SAME method used for printing - it goes through the Windows
+  // print spooler which has exclusive access to the USB device.
+  if (printerName && process.platform === 'win32') {
+    try {
+      console.log('[Hardware] Sending cash drawer command via Windows spooler to:', printerName);
+      const result = await sendRawToPrinter(drawerCmd, printerName);
+      return { success: true, ...result };
+    } catch (err) {
+      console.warn('[Hardware] Cash drawer via spooler failed:', err.message, '- trying direct USB');
+    }
+  }
+
+  // Fallback: direct USB via node-escpos
   try {
     const USB = require('@node-escpos/usb-adapter');
     return new Promise((resolve, reject) => {
       const device = new USB.default();
       device.open((err) => {
-        if (err) return reject(err);
-        device.write(CASH_DRAWER_CMD, (err) => {
+        if (err) return reject(new Error(`Cash drawer USB error: ${err.message}`));
+        device.write(drawerCmd, (err) => {
           device.close();
-          if (err) return reject(err);
+          if (err) return reject(new Error(`Cash drawer write error: ${err.message}`));
           resolve({ success: true });
         });
       });
     });
   } catch (err) {
-    throw new Error(`Cash drawer error: ${err.message}`);
+    throw new Error(`Cash drawer error: ${err.message}. Impresora: ${printerName || 'no detectada'}`);
   }
 }
 
