@@ -647,6 +647,13 @@ function injectDesktopBridge() {
     window.__CELESTE_VERSION__ = '${app.getVersion()}';
     window.__CELESTE_TENANT__ = '${tenantSlug}';
     window.__CELESTE_TENANT_NAME__ = '${tenantName}';
+    // Ensure CelesteDesktop bridge is visible (fallback if preload didn't run)
+    if (!window.CelesteDesktop) {
+      console.warn('[Celeste POS Desktop] CelesteDesktop bridge not found from preload, injecting minimal fallback');
+      window.CelesteDesktop = { isDesktop: true, version: '${app.getVersion()}', _fallback: true };
+    } else {
+      console.log('[Celeste POS Desktop] CelesteDesktop bridge detected from preload');
+    }
     console.log('[Celeste POS Desktop] Running in desktop mode v${app.getVersion()} — Tenant: ${tenantSlug}');
   `;
   mainWindow.webContents.executeJavaScript(script).catch(() => {});
