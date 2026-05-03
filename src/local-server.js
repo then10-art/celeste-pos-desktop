@@ -51,14 +51,24 @@ const MIME_TYPES = {
 function getWebappDir() {
   // Check if running from asar (packaged app)
   if (process.resourcesPath) {
+    // Vite builds to dist/public/, so files land in webapp/public/
+    const asarWebappPublic = path.join(process.resourcesPath, 'webapp', 'public');
+    if (fs.existsSync(asarWebappPublic) && fs.existsSync(path.join(asarWebappPublic, 'index.html'))) {
+      return asarWebappPublic;
+    }
+    // Fallback: files directly in webapp/
     const asarWebapp = path.join(process.resourcesPath, 'webapp');
-    if (fs.existsSync(asarWebapp)) {
+    if (fs.existsSync(asarWebapp) && fs.existsSync(path.join(asarWebapp, 'index.html'))) {
       return asarWebapp;
     }
   }
-  // Development: relative to src/
+  // Development: relative to src/ — check webapp/public/ first
+  const devWebappPublic = path.join(__dirname, '..', 'webapp', 'public');
+  if (fs.existsSync(devWebappPublic) && fs.existsSync(path.join(devWebappPublic, 'index.html'))) {
+    return devWebappPublic;
+  }
   const devWebapp = path.join(__dirname, '..', 'webapp');
-  if (fs.existsSync(devWebapp)) {
+  if (fs.existsSync(devWebapp) && fs.existsSync(path.join(devWebapp, 'index.html'))) {
     return devWebapp;
   }
   return null;
