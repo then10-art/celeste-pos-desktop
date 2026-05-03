@@ -1,6 +1,6 @@
 {
   "name": "celeste-pos-desktop",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Celeste POS - Desktop Application for Windows",
   "main": "src/main.js",
   "author": "Celeste POS",
@@ -38,6 +38,8 @@
     "icon": "assets/icon.ico",
     "asar": true,
     "asarUnpack": [
+      "src/preload.js",
+      "src/setup-preload.js",
       "node_modules/better-sqlite3/**",
       "node_modules/@serialport/**",
       "node_modules/node-hid/**",

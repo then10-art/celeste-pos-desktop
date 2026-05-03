@@ -94,9 +94,8 @@ function createSetupWindow() {
     backgroundColor: '#f8f9fa',
     show: false,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'setup-preload.js'),
+      nodeIntegration: true,
+      contextIsolation: false,
       webSecurity: true,
       enableRemoteModule: false,
     },
@@ -279,12 +278,11 @@ function createWindow() {
     backgroundColor: '#ffffff',
     show: false, // Show after ready-to-show
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: true,
+      contextIsolation: false,
+      // preload no longer needed — bridge injected via executeJavaScript with full node access
       webSecurity: true,
       allowRunningInsecureContent: false,
-      // Required for older Windows compatibility
       enableRemoteModule: false,
     },
   });
@@ -343,7 +341,14 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  // Inject offline indicator when connectivity changes
+  // Inject desktop bridge as early as possible
+  // dom-ready fires before did-finish-load, giving us a head start
+  mainWindow.webContents.on('dom-ready', () => {
+    console.log('[App] DOM ready — injecting desktop bridge early');
+    injectDesktopBridge();
+  });
+
+  // Also inject on did-finish-load as a safety net
   mainWindow.webContents.on('did-finish-load', () => {
     injectOfflineIndicator();
     injectDesktopBridge();
@@ -639,24 +644,122 @@ function injectOfflineIndicator() {
 
 // ─── Desktop Bridge Injection ─────────────────────────────────────────────────
 function injectDesktopBridge() {
-  // Inject a flag so the web app knows it's running in desktop mode
+  // With nodeIntegration: true, we can inject a full bridge using require('electron')
   const tenantSlug = store.get('tenantSlug') || '';
   const tenantName = store.get('tenantName') || '';
+  const machineId = store.get('machineId') || 'unknown';
   const script = `
-    window.__CELESTE_DESKTOP__ = true;
-    window.__CELESTE_VERSION__ = '${app.getVersion()}';
-    window.__CELESTE_TENANT__ = '${tenantSlug}';
-    window.__CELESTE_TENANT_NAME__ = '${tenantName}';
-    // Ensure CelesteDesktop bridge is visible (fallback if preload didn't run)
-    if (!window.CelesteDesktop) {
-      console.warn('[Celeste POS Desktop] CelesteDesktop bridge not found from preload, injecting minimal fallback');
-      window.CelesteDesktop = { isDesktop: true, version: '${app.getVersion()}', _fallback: true };
-    } else {
-      console.log('[Celeste POS Desktop] CelesteDesktop bridge detected from preload');
-    }
-    console.log('[Celeste POS Desktop] Running in desktop mode v${app.getVersion()} — Tenant: ${tenantSlug}');
+    (function() {
+      window.__CELESTE_DESKTOP__ = true;
+      window.__CELESTE_VERSION__ = '${app.getVersion()}';
+      window.__CELESTE_TENANT__ = '${tenantSlug}';
+      window.__CELESTE_TENANT_NAME__ = '${tenantName}';
+
+      // Skip if already fully set up
+      if (window.CelesteDesktop && window.CelesteDesktop.printReceipt && !window.CelesteDesktop._fallback) {
+        console.log('[Celeste POS Desktop] Bridge already active \u2714');
+        return;
+      }
+
+      try {
+        const { ipcRenderer } = require('electron');
+        const os = require('os');
+
+        // Sync event listeners for offline sync
+        const syncListeners = [];
+        ipcRenderer.on('sync-complete', (_event, result) => {
+          for (const cb of syncListeners) {
+            try { cb(result); } catch(e) { /* ignore */ }
+          }
+        });
+
+        window.CelesteDesktop = {
+          isDesktop: true,
+          version: '${app.getVersion()}',
+          machineId: '${machineId}',
+          machineName: os.hostname(),
+
+          // Receipt Printer
+          printReceipt: (data, paperSize) => ipcRenderer.invoke('print-receipt', data, paperSize),
+          getPrinterStatus: () => ipcRenderer.invoke('get-printer-status'),
+
+          // Cash Drawer
+          openCashDrawer: () => ipcRenderer.invoke('open-cash-drawer'),
+
+          // Device Discovery
+          getConnectedDevices: () => ipcRenderer.invoke('get-devices'),
+
+          // Printer Configuration
+          getAvailablePrinters: () => ipcRenderer.invoke('get-available-printers'),
+          savePrinterConfig: (config) => ipcRenderer.invoke('save-printer-config', config),
+
+          // Test Prints
+          testPrintMinimal: () => ipcRenderer.invoke('test-print-minimal'),
+          testPrintGDI: () => ipcRenderer.invoke('test-print-gdi'),
+
+          // Label Printer
+          printLabel: (html, printerName, widthMm, heightMm) => ipcRenderer.invoke('print-label', { html, printerName, widthMm, heightMm }),
+          printLabelOffline: (labelData, printerName, widthMm, heightMm) => ipcRenderer.invoke('print-label-offline', { labelData, printerName, widthMm, heightMm }),
+          printLabelsOffline: (labels, printerName, widthMm, heightMm) => ipcRenderer.invoke('print-labels-offline', { labels, printerName, widthMm, heightMm }),
+          saveLabelPrinter: (printerName) => ipcRenderer.invoke('save-label-printer', printerName),
+          getLabelPrinter: () => ipcRenderer.invoke('get-label-printer'),
+
+          // Print Mode
+          setPrintMode: (mode) => ipcRenderer.invoke('set-print-mode', mode),
+          getPrintMode: () => ipcRenderer.invoke('get-print-mode'),
+
+          // Settings
+          getSettings: () => ipcRenderer.invoke('get-settings'),
+          saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+
+          // Offline / Sync
+          getOfflineStatus: () => ipcRenderer.invoke('get-offline-status'),
+          getQueuedCount: () => ipcRenderer.invoke('get-queued-count'),
+          getQueueStats: () => ipcRenderer.invoke('get-queue-stats'),
+          queueOfflineTransaction: (tx) => ipcRenderer.invoke('queue-offline-transaction', tx),
+          retryFailedItems: () => ipcRenderer.invoke('retry-failed-items'),
+          forceSync: () => ipcRenderer.invoke('force-sync'),
+          onSyncComplete: (callback) => {
+            syncListeners.push(callback);
+            return () => {
+              const idx = syncListeners.indexOf(callback);
+              if (idx !== -1) syncListeners.splice(idx, 1);
+            };
+          },
+
+          // File System
+          showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
+          showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
+
+          // BarTender Integration
+          bartenderPrint: (labels, templatePath, copies) => ipcRenderer.invoke('bartender-print', { labels, templatePath, copies }),
+          bartenderGetConfig: () => ipcRenderer.invoke('bartender-get-config'),
+          bartenderSetConfig: (config) => ipcRenderer.invoke('bartender-set-config', config),
+          bartenderBrowseExe: () => ipcRenderer.invoke('bartender-browse-exe'),
+          bartenderBrowseTemplate: () => ipcRenderer.invoke('bartender-browse-template'),
+
+          // Tenant Info
+          getTenantInfo: () => ipcRenderer.invoke('get-tenant-info'),
+
+          // Event Listeners
+          onOnline: (cb) => { window.addEventListener('celeste-online', cb); return () => window.removeEventListener('celeste-online', cb); },
+          onOffline: (cb) => { window.addEventListener('celeste-offline', cb); return () => window.removeEventListener('celeste-offline', cb); },
+          onOpenPrinterConfig: (cb) => { window.addEventListener('celeste-open-printer-config', cb); return () => window.removeEventListener('celeste-open-printer-config', cb); },
+        };
+
+        console.log('[Celeste POS Desktop] Full IPC bridge injected via nodeIntegration \u2714');
+      } catch (err) {
+        console.error('[Celeste POS Desktop] Failed to inject IPC bridge:', err);
+        // Last resort: at least mark as desktop
+        window.CelesteDesktop = { isDesktop: true, version: '${app.getVersion()}', _fallback: true };
+      }
+
+      console.log('[Celeste POS Desktop] Running in desktop mode v${app.getVersion()} \u2014 Tenant: ${tenantSlug}');
+    })();
   `;
-  mainWindow.webContents.executeJavaScript(script).catch(() => {});
+  mainWindow.webContents.executeJavaScript(script).catch((err) => {
+    console.error('[App] Failed to inject desktop bridge:', err.message);
+  });
 }
 
 // ─── Connectivity Monitoring (Adaptive Polling) ─────────────────────────────
