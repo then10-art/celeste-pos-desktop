@@ -56,6 +56,7 @@ let userTriggeredUpdateCheck = false;
 const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getRetryableItems, getQueueStats, retryFailedItems, purgeOldSyncedItems } = require('./database');
 const { syncWithCloud, checkCloudHealth } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName } = require('./hardware');
+const { printReceiptGDI, printLabelGDI, printLabelsGDI } = require('./hardware/offlinePrinter');
 const { startLocalServer } = require('./local-server');
 
 // ─── Local Server State ──────────────────────────────────────────────────────
@@ -947,13 +948,46 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   if (paperSize === 'label' && receiptData.html) {
     return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'), receiptData.widthMm, receiptData.heightMm);
   }
-  try {
-    const result = await printReceipt(receiptData, paperSize);
-    console.log('[IPC] print-receipt result:', JSON.stringify(result));
-    return result;
-  } catch (err) {
-    console.error('[IPC] print-receipt error:', err.message);
-    return { success: false, error: err.message };
+
+  // Determine print mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
+  const printMode = store.get('printMode') || 'gdi';
+  const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
+  console.log('[IPC] print-receipt mode:', printMode, 'printer:', printerName, 'paperSize:', paperSize);
+
+  if (printMode === 'gdi') {
+    // PRIMARY: GDI mode (Windows Driver) - most compatible, like Eleventa
+    try {
+      const result = await printReceiptGDI(receiptData, printerName, paperSize);
+      console.log('[IPC] print-receipt GDI result:', JSON.stringify(result));
+      return result;
+    } catch (err) {
+      console.warn('[IPC] GDI print failed:', err.message, '- trying raw ESC/POS fallback');
+      // Fallback to raw ESC/POS
+      try {
+        const result = await printReceipt(receiptData, paperSize);
+        return result;
+      } catch (err2) {
+        console.error('[IPC] Both GDI and ESC/POS failed:', err2.message);
+        return { success: false, error: `GDI: ${err.message} | ESC/POS: ${err2.message}` };
+      }
+    }
+  } else {
+    // RAW mode: ESC/POS direct (original behavior)
+    try {
+      const result = await printReceipt(receiptData, paperSize);
+      console.log('[IPC] print-receipt RAW result:', JSON.stringify(result));
+      return result;
+    } catch (err) {
+      console.warn('[IPC] RAW ESC/POS failed:', err.message, '- trying GDI fallback');
+      // Fallback to GDI
+      try {
+        const result = await printReceiptGDI(receiptData, printerName, paperSize);
+        return result;
+      } catch (err2) {
+        console.error('[IPC] Both ESC/POS and GDI failed:', err2.message);
+        return { success: false, error: `ESC/POS: ${err.message} | GDI: ${err2.message}` };
+      }
+    }
   }
 });
 
@@ -961,6 +995,43 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
 ipcMain.handle('print-label', async (event, { html, printerName, widthMm, heightMm }) => {
   const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
   return await printLabelHTML(html, name, widthMm, heightMm);
+});
+
+// ─── Offline Label Printing (structured data, no HTML from web app) ─────────
+ipcMain.handle('print-labels-offline', async (event, { labels, printerName, widthMm, heightMm }) => {
+  const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
+  console.log('[IPC] print-labels-offline:', labels.length, 'labels to:', name);
+  try {
+    const result = await printLabelsGDI(labels, name, widthMm || 37.3, heightMm || 28.6);
+    return result;
+  } catch (err) {
+    console.error('[IPC] print-labels-offline error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('print-label-offline', async (event, { labelData, printerName, widthMm, heightMm }) => {
+  const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
+  console.log('[IPC] print-label-offline:', labelData.productName, 'to:', name);
+  try {
+    const result = await printLabelGDI(labelData, name, widthMm || 37.3, heightMm || 28.6);
+    return result;
+  } catch (err) {
+    console.error('[IPC] print-label-offline error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── Print Mode Setting ─────────────────────────────────────────────────────
+ipcMain.handle('set-print-mode', (event, mode) => {
+  // mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
+  store.set('printMode', mode);
+  console.log('[IPC] Print mode set to:', mode);
+  return true;
+});
+
+ipcMain.handle('get-print-mode', () => {
+  return store.get('printMode') || 'gdi';
 });
 
 ipcMain.handle('save-label-printer', (event, printerName) => {

@@ -88,11 +88,25 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   printLabel: (html, printerName, widthMm, heightMm) =>
     ipcRenderer.invoke('print-label', { html, printerName, widthMm, heightMm }),
 
+  // Offline label printing (structured data, no HTML from web app needed)
+  printLabelOffline: (labelData, printerName, widthMm, heightMm) =>
+    ipcRenderer.invoke('print-label-offline', { labelData, printerName, widthMm, heightMm }),
+
+  printLabelsOffline: (labels, printerName, widthMm, heightMm) =>
+    ipcRenderer.invoke('print-labels-offline', { labels, printerName, widthMm, heightMm }),
+
   saveLabelPrinter: (printerName) =>
     ipcRenderer.invoke('save-label-printer', printerName),
 
   getLabelPrinter: () =>
     ipcRenderer.invoke('get-label-printer'),
+
+  // ── Print Mode (GDI vs RAW ESC/POS) ──────────────────────────────────────────
+  setPrintMode: (mode) =>
+    ipcRenderer.invoke('set-print-mode', mode),
+
+  getPrintMode: () =>
+    ipcRenderer.invoke('get-print-mode'),
 
   // ── Settings ──────────────────────────────────────────────────────────────
   getSettings: () =>
