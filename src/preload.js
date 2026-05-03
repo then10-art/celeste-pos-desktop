@@ -77,6 +77,13 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   savePrinterConfig: (config) =>
     ipcRenderer.invoke('save-printer-config', config),
 
+  // ── Diagnostic Test Prints ──────────────────────────────────────────────────
+  testPrintMinimal: () =>
+    ipcRenderer.invoke('test-print-minimal'),
+
+  testPrintGDI: () =>
+    ipcRenderer.invoke('test-print-gdi'),
+
   // ── Label Printer ───────────────────────────────────────────────────────────────
   printLabel: (html, printerName, widthMm, heightMm) =>
     ipcRenderer.invoke('print-label', { html, printerName, widthMm, heightMm }),

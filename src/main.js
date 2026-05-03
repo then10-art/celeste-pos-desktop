@@ -55,7 +55,7 @@ let userTriggeredUpdateCheck = false;
 // ─── Sync & Offline Modules ───────────────────────────────────────────────────
 const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getRetryableItems, getQueueStats, retryFailedItems, purgeOldSyncedItems } = require('./database');
 const { syncWithCloud, checkCloudHealth } = require('./sync');
-const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters } = require('./hardware');
+const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName } = require('./hardware');
 const { startLocalServer } = require('./local-server');
 
 // ─── Local Server State ──────────────────────────────────────────────────────
@@ -468,6 +468,15 @@ function buildAppMenu() {
         {
           label: 'Abrir Gaveta',
           click: () => openCashDrawer()
+        },
+        { type: 'separator' },
+        {
+          label: 'Test: Raw ESC/POS Mínimo',
+          click: () => testPrintMinimal()
+        },
+        {
+          label: 'Test: GDI (como Eleventa)',
+          click: () => testPrintGDI()
         },
         { type: 'separator' },
         {
@@ -979,11 +988,11 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
   }
 
   // Convert mm to microns (1mm = 1000 microns)
-  // Default to 48x32mm (Mediana) if not specified
-  const wMicrons = (widthMm || 48) * 1000;
-  const hMicrons = (heightMm || 32) * 1000;
+  // Default to 37.3x28.6mm to match 4BARCODE 4B-2074B sticker size
+  const wMicrons = Math.round((widthMm || 37.3) * 1000);
+  const hMicrons = Math.round((heightMm || 28.6) * 1000);
 
-  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${widthMm || 48}x${heightMm || 32}mm)`);
+  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${widthMm || 37.3}x${heightMm || 28.6}mm)`);
 
   return new Promise((resolve, reject) => {
     const { BrowserWindow: BW } = require('electron');
@@ -1056,6 +1065,107 @@ ipcMain.handle('save-printer-config', (event, config) => {
   // Re-initialize hardware with new config, passing mainWindow for system printer access
   setupHardware(config, mainWindow);
   return true;
+});
+
+// ─── Diagnostic Test Prints ─────────────────────────────────────────────────
+// Minimal raw ESC/POS test - sends absolute minimum data to isolate issues
+ipcMain.handle('test-print-minimal', async () => {
+  const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
+  if (!printerName) return { success: false, error: 'No printer configured' };
+
+  try {
+    // Test 1: Absolute minimum - just ESC @ init + plain ASCII text + line feeds + cut
+    // NO code page commands, NO formatting - just raw ASCII
+    const ESC = 0x1B, GS = 0x1D, LF = 0x0A;
+    const text = 'HELLO WORLD - CELESTE POS TEST';
+    const textBytes = Buffer.from(text, 'ascii');
+    const rawData = Buffer.concat([
+      Buffer.from([ESC, 0x40]),           // ESC @ - Initialize printer
+      textBytes,                           // Plain ASCII text
+      Buffer.from([LF, LF]),              // Line feeds
+      Buffer.from('Fecha: ' + new Date().toLocaleString('es-DO'), 'ascii'),
+      Buffer.from([LF, LF, LF, LF]),     // Feed paper
+      Buffer.from([GS, 0x56, 0x41, 0x03]) // GS V A 3 - Partial cut
+    ]);
+    console.log('[Test] Sending minimal raw ESC/POS:', rawData.length, 'bytes to:', printerName);
+    const result = await sendRawToPrinter(rawData, printerName);
+    return { success: true, method: 'raw-minimal', ...result };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// GDI text test - prints via Windows driver like Eleventa does (Courier New, plain text)
+ipcMain.handle('test-print-gdi', async () => {
+  const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
+  if (!printerName) return { success: false, error: 'No printer configured' };
+
+  try {
+    const { BrowserWindow: BW } = require('electron');
+    const os = require('os');
+    const path = require('path');
+    const fs = require('fs');
+
+    // Build a simple text-based receipt like Eleventa does
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+@page { margin: 0; size: 80mm auto; }
+body { font-family: 'Courier New', monospace; font-size: 12pt; width: 80mm; margin: 0; padding: 2mm; }
+</style></head><body>
+<pre>
+========================================
+        SUPERMERCADO CELESTE
+        PRUEBA DE IMPRESION
+========================================
+Fecha: ${new Date().toLocaleString('es-DO')}
+
+Este es un test de impresion GDI.
+Si puede ver este texto, la impresora
+funciona con el metodo Windows GDI.
+
+Columnas: 42 caracteres (80mm)
+========================================
+123456789012345678901234567890123456789012
+========================================
+
+
+
+</pre>
+</body></html>`;
+
+    const tmpFile = path.join(os.tmpdir(), `celeste-gdi-test-${Date.now()}.html`);
+    fs.writeFileSync(tmpFile, html, 'utf-8');
+
+    return new Promise((resolve, reject) => {
+      const printWin = new BW({
+        show: false, width: 302, height: 2000,
+        webPreferences: { nodeIntegration: false, contextIsolation: true }
+      });
+      printWin.loadFile(tmpFile);
+      printWin.webContents.on('did-finish-load', () => {
+        setTimeout(() => {
+          printWin.webContents.print({
+            silent: true, printBackground: true, deviceName: printerName,
+            margins: { marginType: 'none' },
+            pageSize: { width: 80000, height: 300000 }
+          }, (success, failureReason) => {
+            printWin.close();
+            try { fs.unlinkSync(tmpFile); } catch {}
+            if (success) resolve({ success: true, method: 'gdi-text' });
+            else resolve({ success: false, error: failureReason || 'GDI print failed' });
+          });
+        }, 1000);
+      });
+      setTimeout(() => {
+        try { printWin.close(); } catch {}
+        try { fs.unlinkSync(tmpFile); } catch {}
+        resolve({ success: false, error: 'GDI print timeout' });
+      }, 15000);
+    });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle('get-settings', () => {
@@ -1204,6 +1314,107 @@ async function testPrinter() {
     });
   } catch (err) {
     dialog.showErrorBox('Error de Impresora', `No se pudo imprimir: ${err.message}`);
+  }
+}
+
+async function testPrintMinimal() {
+  const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
+  if (!printerName) {
+    dialog.showErrorBox('Error', 'No hay impresora configurada.');
+    return;
+  }
+  try {
+    const ESC = 0x1B, GS = 0x1D, LF = 0x0A;
+    const text = 'HELLO WORLD - CELESTE POS TEST';
+    const textBytes = Buffer.from(text, 'ascii');
+    const rawData = Buffer.concat([
+      Buffer.from([ESC, 0x40]),
+      textBytes,
+      Buffer.from([LF, LF]),
+      Buffer.from('Fecha: ' + new Date().toLocaleString('es-DO'), 'ascii'),
+      Buffer.from([LF, LF, LF, LF]),
+      Buffer.from([GS, 0x56, 0x41, 0x03])
+    ]);
+    await sendRawToPrinter(rawData, printerName);
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Test Raw ESC/POS',
+      message: `Enviado ${rawData.length} bytes a "${printerName}".\nSi sale en blanco, el problema es ESC/POS.\nPruebe el test GDI.`,
+    });
+  } catch (err) {
+    dialog.showErrorBox('Error Raw ESC/POS', `Fallo: ${err.message}`);
+  }
+}
+
+async function testPrintGDI() {
+  const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
+  if (!printerName) {
+    dialog.showErrorBox('Error', 'No hay impresora configurada.');
+    return;
+  }
+  try {
+    const os = require('os');
+    const pathMod = require('path');
+    const fs = require('fs');
+    const { BrowserWindow: BW } = require('electron');
+
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+@page { margin: 0; size: 80mm auto; }
+body { font-family: 'Courier New', monospace; font-size: 12pt; width: 80mm; margin: 0; padding: 2mm; }
+</style></head><body>
+<pre>
+========================================
+        SUPERMERCADO CELESTE
+        PRUEBA DE IMPRESION GDI
+========================================
+Fecha: ${new Date().toLocaleString('es-DO')}
+
+Este es un test GDI (Windows driver).
+Si puede ver este texto, use GDI
+como metodo principal de impresion.
+
+========================================
+123456789012345678901234567890123456789012
+========================================
+
+
+
+</pre>
+</body></html>`;
+
+    const tmpFile = pathMod.join(os.tmpdir(), `celeste-gdi-test-${Date.now()}.html`);
+    fs.writeFileSync(tmpFile, html, 'utf-8');
+
+    const printWin = new BW({
+      show: false, width: 302, height: 2000,
+      webPreferences: { nodeIntegration: false, contextIsolation: true }
+    });
+    printWin.loadFile(tmpFile);
+    printWin.webContents.on('did-finish-load', () => {
+      setTimeout(() => {
+        printWin.webContents.print({
+          silent: true, printBackground: true, deviceName: printerName,
+          margins: { marginType: 'none' },
+          pageSize: { width: 80000, height: 300000 }
+        }, (success, failureReason) => {
+          printWin.close();
+          try { fs.unlinkSync(tmpFile); } catch {}
+          if (success) {
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: 'Test GDI',
+              message: `Impresion GDI enviada a "${printerName}".\nSi imprime texto, cambiaremos a metodo GDI.`,
+            });
+          } else {
+            dialog.showErrorBox('Error GDI', `Fallo: ${failureReason}`);
+          }
+        });
+      }, 1000);
+    });
+  } catch (err) {
+    dialog.showErrorBox('Error GDI', `Fallo: ${err.message}`);
   }
 }
 

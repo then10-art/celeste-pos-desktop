@@ -298,9 +298,9 @@ async function printRawEscPos(receiptData, printerName, paperSize) {
 
   // Initialize printer - CRITICAL: must send init command first
   buffers.push(Buffer.from([ESC, 0x40])); // ESC @ - Initialize/Reset printer
-  // Small delay equivalent - send a few null bytes to let printer reset
-  buffers.push(Buffer.from([0x00, 0x00]));
-  buffers.push(Buffer.from([ESC, 0x74, 0x10])); // ESC t 16 - Set code page to WPC1252
+  // NOTE: Do NOT send null bytes after init - some printers interpret them as data
+  // Use PC437 code page (0) which is universally supported by all ESC/POS printers
+  buffers.push(Buffer.from([ESC, 0x74, 0x00])); // ESC t 0 - Set code page to PC437 (default, universal)
 
   for (const line of lines) {
     switch (line.type) {
@@ -511,7 +511,8 @@ if ($ok) { Write-Output 'OK' } else { throw 'WritePrinter failed - check printer
   throw new Error(errMsg);
 }
 
-// Encode text to Windows-1252 compatible bytes (handles Spanish characters)
+// Encode text to PC437 compatible bytes (handles Spanish characters)
+// PC437 is the default code page for ESC/POS printers and is universally supported
 function encodeText(text) {
   const result = [];
   for (let i = 0; i < text.length; i++) {
@@ -519,26 +520,27 @@ function encodeText(text) {
     if (code < 128) {
       result.push(code);
     } else {
+      // PC437 encoding map for Spanish characters
       const map = {
-        0xe1: 0xe1, // á
-        0xe9: 0xe9, // é
-        0xed: 0xed, // í
-        0xf3: 0xf3, // ó
-        0xfa: 0xfa, // ú
-        0xf1: 0xf1, // ñ
-        0xc1: 0xc1, // Á
-        0xc9: 0xc9, // É
-        0xcd: 0xcd, // Í
-        0xd3: 0xd3, // Ó
-        0xda: 0xda, // Ú
-        0xd1: 0xd1, // Ñ
-        0xfc: 0xfc, // ü
-        0xdc: 0xdc, // Ü
-        0xbf: 0xbf, // ¿
-        0xa1: 0xa1, // ¡
-        0x2014: 0x97, // —
-        0x2013: 0x96, // –
-        0x2026: 0x85, // …
+        0xe1: 0xa0, // á
+        0xe9: 0x82, // é
+        0xed: 0xa1, // í
+        0xf3: 0xa2, // ó
+        0xfa: 0xa3, // ú
+        0xf1: 0xa4, // ñ
+        0xc1: 0x41, // Á → A (no uppercase accented in PC437)
+        0xc9: 0x45, // É → E
+        0xcd: 0x49, // Í → I
+        0xd3: 0x4f, // Ó → O
+        0xda: 0x55, // Ú → U
+        0xd1: 0xa5, // Ñ
+        0xfc: 0x81, // ü
+        0xdc: 0x9a, // Ü
+        0xbf: 0xa8, // ¿
+        0xa1: 0xad, // ¡
+        0x2014: 0x2d, // — → -
+        0x2013: 0x2d, // – → -
+        0x2026: 0x2e, // … → .
         0x20: 0x20, // space
       };
       result.push(map[code] || 0x3f); // Use '?' for unmapped chars
@@ -993,4 +995,4 @@ async function openCashDrawer() {
   }
 }
 
-module.exports = { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters };
+module.exports = { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName };
