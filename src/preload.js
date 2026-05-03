@@ -150,6 +150,22 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   showOpenDialog: (options) =>
     ipcRenderer.invoke('show-open-dialog', options),
 
+  // ── BarTender Integration ─────────────────────────────────────────────────
+  bartenderPrint: (labels, templatePath, copies) =>
+    ipcRenderer.invoke('bartender-print', { labels, templatePath, copies }),
+
+  bartenderGetConfig: () =>
+    ipcRenderer.invoke('bartender-get-config'),
+
+  bartenderSetConfig: (config) =>
+    ipcRenderer.invoke('bartender-set-config', config),
+
+  bartenderBrowseExe: () =>
+    ipcRenderer.invoke('bartender-browse-exe'),
+
+  bartenderBrowseTemplate: () =>
+    ipcRenderer.invoke('bartender-browse-template'),
+
    // ── Tenant Info ───────────────────────────────────────────────────────
   getTenantInfo: () =>
     ipcRenderer.invoke('get-tenant-info'),

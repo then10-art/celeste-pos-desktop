@@ -1002,8 +1002,9 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
     return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'), receiptData.widthMm, receiptData.heightMm);
   }
 
-  // Determine print mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
-  const printMode = store.get('printMode') || 'gdi';
+  // Determine print mode: 'raw' (ESC/POS, best for generic thermal) or 'gdi' (Windows Driver)
+  // Default changed to 'raw' because generic 80mm thermal printers work much better with ESC/POS
+  const printMode = store.get('printMode') || 'raw';
   const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
   console.log('[IPC] print-receipt mode:', printMode, 'printer:', printerName, 'paperSize:', paperSize);
 
@@ -1352,6 +1353,134 @@ ipcMain.handle('show-save-dialog', async (event, options) => {
 
 ipcMain.handle('show-open-dialog', async (event, options) => {
   return await dialog.showOpenDialog(mainWindow, options);
+});
+
+// ─── IPC: BarTender Integration ──────────────────────────────────────────────
+ipcMain.handle('bartender-print', async (event, { labels, templatePath, copies }) => {
+  const { execFile } = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
+  const pathMod = require('path');
+
+  // Find BarTender executable
+  let bartendExe = store.get('bartenderPath');
+  if (!bartendExe || !fs.existsSync(bartendExe)) {
+    // Auto-detect common installation paths
+    const possiblePaths = [
+      'C:\\Program Files\\Seagull\\BarTender Suite\\bartend.exe',
+      'C:\\Program Files\\Seagull\\BarTender 2022\\bartend.exe',
+      'C:\\Program Files\\Seagull\\BarTender 2021\\bartend.exe',
+      'C:\\Program Files\\Seagull\\BarTender 2019\\bartend.exe',
+      'C:\\Program Files\\Seagull\\BarTender 2016\\bartend.exe',
+      'C:\\Program Files (x86)\\Seagull\\BarTender Suite\\bartend.exe',
+      'C:\\Program Files (x86)\\Seagull\\BarTender 2022\\bartend.exe',
+      'C:\\Program Files (x86)\\Seagull\\BarTender 2019\\bartend.exe',
+      'C:\\Program Files (x86)\\Seagull\\BarTender 2016\\bartend.exe',
+      'C:\\Program Files\\Seagull\\BarTender\\bartend.exe',
+      'C:\\Program Files (x86)\\Seagull\\BarTender\\bartend.exe',
+    ];
+    bartendExe = possiblePaths.find(p => fs.existsSync(p));
+    if (bartendExe) {
+      store.set('bartenderPath', bartendExe);
+    }
+  }
+
+  if (!bartendExe) {
+    return { success: false, error: 'BarTender no encontrado. Configure la ruta en Configuración.' };
+  }
+
+  // Resolve template path
+  let btwPath = templatePath || store.get('bartenderTemplate');
+  if (!btwPath || !fs.existsSync(btwPath)) {
+    return { success: false, error: 'Plantilla .btw no configurada o no encontrada. Configure en Configuración.' };
+  }
+
+  // Write temporary CSV data file with label data
+  // Headers: ProductName, Price, Barcode, StoreName, Quantity
+  const csvLines = ['ProductName,Price,Barcode,StoreName,Quantity'];
+  for (const label of labels) {
+    const qty = copies || label.quantity || 1;
+    for (let i = 0; i < qty; i++) {
+      const name = (label.productName || '').replace(/"/g, '""');
+      const price = label.price || '';
+      const barcode = label.barcode || '';
+      const storeName = (label.storeName || store.get('tenantName') || 'SUPERMERCADO CELESTE').replace(/"/g, '""');
+      csvLines.push(`"${name}","${price}","${barcode}","${storeName}","1"`);
+    }
+  }
+
+  const csvContent = csvLines.join('\r\n');
+  const tmpCsv = pathMod.join(os.tmpdir(), `celeste-labels-${Date.now()}.csv`);
+  fs.writeFileSync(tmpCsv, csvContent, 'utf-8');
+
+  console.log(`[BarTender] Printing ${labels.length} labels via: ${bartendExe}`);
+  console.log(`[BarTender] Template: ${btwPath}`);
+  console.log(`[BarTender] Data file: ${tmpCsv}`);
+
+  // Execute BarTender: /F=template /D=datafile /P (print) /X (close after)
+  return new Promise((resolve) => {
+    const args = [
+      `/F=${btwPath}`,
+      `/D=${tmpCsv}`,
+      '/FP',  // Force use database
+      '/X'    // Close BarTender after printing
+    ];
+
+    execFile(bartendExe, args, { timeout: 30000 }, (error, stdout, stderr) => {
+      // Clean up temp file after a delay
+      setTimeout(() => {
+        try { fs.unlinkSync(tmpCsv); } catch {}
+      }, 5000);
+
+      if (error) {
+        console.error('[BarTender] Error:', error.message);
+        resolve({ success: false, error: error.message });
+      } else {
+        console.log('[BarTender] Print job sent successfully');
+        resolve({ success: true });
+      }
+    });
+  });
+});
+
+ipcMain.handle('bartender-get-config', () => {
+  return {
+    bartenderPath: store.get('bartenderPath') || '',
+    templatePath: store.get('bartenderTemplate') || '',
+  };
+});
+
+ipcMain.handle('bartender-set-config', (event, { bartenderPath, templatePath }) => {
+  if (bartenderPath) store.set('bartenderPath', bartenderPath);
+  if (templatePath) store.set('bartenderTemplate', templatePath);
+  return { success: true };
+});
+
+ipcMain.handle('bartender-browse-exe', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Seleccionar bartend.exe',
+    filters: [{ name: 'Ejecutable', extensions: ['exe'] }],
+    properties: ['openFile'],
+    defaultPath: 'C:\\Program Files\\Seagull',
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    store.set('bartenderPath', result.filePaths[0]);
+    return { success: true, path: result.filePaths[0] };
+  }
+  return { success: false };
+});
+
+ipcMain.handle('bartender-browse-template', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Seleccionar plantilla .btw',
+    filters: [{ name: 'BarTender Template', extensions: ['btw'] }],
+    properties: ['openFile'],
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    store.set('bartenderTemplate', result.filePaths[0]);
+    return { success: true, path: result.filePaths[0] };
+  }
+  return { success: false };
 });
 
 // ─── IPC: Get tenant info ────────────────────────────────────────────────────

@@ -244,7 +244,7 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
             reject(new Error(failureReason || 'GDI print failed'));
           }
         });
-      }, 1000); // Wait for content to render
+      }, 2000); // Wait 2s for content/fonts to fully render before printing
     });
 
     printWin.webContents.on('did-fail-load', (_event, _code, desc) => {
@@ -257,8 +257,8 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
     setTimeout(() => {
       try { printWin.close(); } catch {}
       try { fs.unlinkSync(tmpFile); } catch {}
-      reject(new Error('Print timeout (15s)'));
-    }, 15000);
+      reject(new Error('Print timeout (20s)'));
+    }, 20000);
   });
 }
 
