@@ -326,6 +326,41 @@ async function launchMainApp() {
   // Setup hardware with mainWindow reference for system printer access
   await setupHardware(store.get('printerConfig'), mainWindow);
 
+  // One-time migration: force GDI mode for users updating from old version that had 'raw' default
+  // This ensures the blank receipt bug is fixed even if printMode was previously saved as 'raw'
+  if (!store.get('_migratedToGdi_v2')) {
+    const oldMode = store.get('printMode');
+    if (oldMode === 'raw' || !oldMode) {
+      console.log('[App] Migration: switching printMode from', oldMode || '(unset)', 'to gdi');
+      store.set('printMode', 'gdi');
+    }
+    store.set('_migratedToGdi_v2', true);
+  }
+
+  // Auto-detect and save printer if not configured (e.g., after update from older version)
+  const currentPrinterName = store.get('printerConfig.printerName');
+  if (!currentPrinterName) {
+    console.log('[App] No printer configured — running auto-detection...');
+    try {
+      const detectedName = await getAutoDetectedPrinterName();
+      if (detectedName) {
+        console.log('[App] Auto-detected printer:', detectedName);
+        store.set('printerConfig.printerName', detectedName);
+        store.set('printerConfig.type', 'usb');
+        // Default to GDI mode (Windows Driver) - most compatible with manufacturer drivers
+        if (!store.get('printMode')) {
+          store.set('printMode', 'gdi');
+        }
+        // Re-init hardware with the detected printer name
+        await setupHardware(store.get('printerConfig'), mainWindow);
+      } else {
+        console.log('[App] No receipt printer auto-detected — user must configure manually');
+      }
+    } catch (err) {
+      console.warn('[App] Printer auto-detection failed:', err.message);
+    }
+  }
+
   // Create system tray
   createTray();
 
@@ -584,6 +619,15 @@ function buildAppMenu() {
         {
           label: 'Dispositivos Conectados',
           click: () => showConnectedDevices()
+        },
+        { type: 'separator' },
+        {
+          label: 'Ver Log de Impresión',
+          click: () => viewPrintLog()
+        },
+        {
+          label: 'Test: Diagnóstico Completo',
+          click: () => runPrintDiagnostic()
         }
       ]
     },
@@ -1183,15 +1227,43 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
     return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'), receiptData.widthMm, receiptData.heightMm);
   }
 
+  // Handle raw HTML string passed from CashierClosing/Cuadre pages
+  // These pages pass pre-built HTML instead of a ReceiptData object.
+  // Print them directly via GDI (HTML rendering) since they can't be converted to ESC/POS lines.
+  if (typeof receiptData === 'string' && receiptData.trim().startsWith('<')) {
+    const htmlPrinterName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
+    console.log('[IPC] print-receipt: received raw HTML string, using GDI print to:', htmlPrinterName);
+    if (!htmlPrinterName) {
+      return { success: false, error: 'No printer configured for HTML printing' };
+    }
+    try {
+      const { printHTMLDocument } = require('./hardware/offlinePrinter');
+      const widthMm = (paperSize === '58') ? 58 : 80;
+      const result = await printHTMLDocument(receiptData, htmlPrinterName, widthMm, null);
+      return result;
+    } catch (err) {
+      console.error('[IPC] HTML string print failed:', err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
   // Determine print mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
-  // Default is 'raw' (ESC/POS) - most reliable for USB thermal printers on all Windows versions
-  const printMode = store.get('printMode') || 'raw';
+  // Default is 'gdi' (Windows Driver) - most compatible with manufacturer drivers (AOKIA, Epson, etc.)
+  // RAW ESC/POS only works with "Generic / Text Only" driver
+  const printMode = store.get('printMode') || 'gdi';
   const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
   console.log('[IPC] print-receipt mode:', printMode, 'printer:', printerName, 'paperSize:', paperSize);
+
+  // Log receipt data summary for debugging
+  const itemCount = receiptData?.items?.length || 0;
+  const hasStoreName = !!receiptData?.storeName;
+  const hasLines = !!receiptData?.lines;
+  console.log(`[IPC] Receipt data: storeName=${hasStoreName}, items=${itemCount}, lines=${hasLines}, type=${receiptData?.type || 'sale'}`);
 
   if (printMode === 'gdi') {
     // PRIMARY: GDI mode (Windows Driver) - most compatible, like Eleventa
     try {
+      console.log('[IPC] Starting GDI print...');
       const result = await printReceiptGDI(receiptData, printerName, paperSize);
       console.log('[IPC] print-receipt GDI result:', JSON.stringify(result));
       return result;
@@ -1266,7 +1338,7 @@ ipcMain.handle('set-print-mode', (event, mode) => {
 });
 
 ipcMain.handle('get-print-mode', () => {
-  return store.get('printMode') || 'raw';
+  return store.get('printMode') || 'gdi';
 });
 
 ipcMain.handle('save-label-printer', (event, printerName) => {
@@ -1973,3 +2045,173 @@ if (!gotTheLock) {
     }
   });
 }
+
+
+// ─── View Print Log ──────────────────────────────────────────────────────────
+function viewPrintLog() {
+  const { printLogger } = require('./hardware');
+  const logPath = printLogger.getLogFilePath();
+  const fs = require('fs');
+  
+  if (fs.existsSync(logPath)) {
+    // Open log file in default text editor
+    shell.openPath(logPath);
+  } else {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Log de Impresión',
+      message: 'No hay log de impresión todavía.\n\nEl log se creará automáticamente después del primer intento de impresión.',
+      detail: `Ubicación: ${logPath}`,
+    });
+  }
+}
+
+// ─── Full Print Diagnostic ───────────────────────────────────────────────────
+async function runPrintDiagnostic() {
+  const { printLogger } = require('./hardware');
+  const results = [];
+  
+  // Step 1: Check printer detection
+  results.push('=== DIAGNÓSTICO DE IMPRESIÓN ===');
+  results.push(`Fecha: ${new Date().toLocaleString('es-DO')}`);
+  results.push('');
+  
+  // Configured printer
+  const configuredPrinter = store.get('printerConfig.printerName') || '(no configurada)';
+  const printMode = store.get('printMode') || 'gdi';
+  results.push(`Impresora configurada: ${configuredPrinter}`);
+  results.push(`Modo de impresión: ${printMode}`);
+  results.push('');
+  
+  // All system printers
+  results.push('--- Impresoras del Sistema ---');
+  let printers = [];
+  if (mainWindow) {
+    try {
+      printers = mainWindow.webContents.getPrinters();
+      for (const p of printers) {
+        const statusText = p.status === 0 ? 'LISTA' : `status=${p.status}`;
+        const defaultText = p.isDefault ? ' [DEFAULT]' : '';
+        results.push(`  ${p.name} - ${statusText}${defaultText}`);
+      }
+    } catch (err) {
+      results.push(`  Error al obtener impresoras: ${err.message}`);
+    }
+  }
+  results.push('');
+  
+  // Auto-detection result
+  const autoDetected = await getAutoDetectedPrinterName();
+  results.push(`Auto-detección: ${autoDetected || 'NINGUNA ENCONTRADA'}`);
+  results.push('');
+  
+  // Step 2: Try raw ESC/POS test
+  const printerName = configuredPrinter !== '(no configurada)' ? configuredPrinter : autoDetected;
+  if (!printerName) {
+    results.push('ERROR: No hay impresora disponible para probar.');
+    dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: 'Diagnóstico de Impresión',
+      message: results.join('\n'),
+    });
+    return;
+  }
+  
+  results.push(`--- Probando con: ${printerName} ---`);
+  results.push('');
+  
+  // Test 1: Raw ESC/POS
+  results.push('Test 1: Raw ESC/POS (P/Invoke)...');
+  try {
+    const ESC = 0x1B, GS = 0x1D, LF = 0x0A;
+    const testLines = [
+      Buffer.from([ESC, 0x40]), // Init
+      Buffer.from([ESC, 0x74, 0x00]), // Code page PC437
+      Buffer.from([ESC, 0x61, 0x01]), // Center
+      Buffer.from([ESC, 0x45, 0x01]), // Bold on
+      Buffer.from('DIAGNOSTICO CELESTE POS', 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from([ESC, 0x45, 0x00]), // Bold off
+      Buffer.from([ESC, 0x61, 0x00]), // Left
+      Buffer.from('-'.repeat(42), 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from(`Impresora: ${printerName.substring(0, 30)}`, 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from(`Modo: ${printMode}`, 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from(`Fecha: ${new Date().toLocaleString('es-DO')}`, 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('-'.repeat(42), 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('Si puede leer esto, RAW ESC/POS', 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('funciona correctamente.', 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('-'.repeat(42), 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('Producto Test     RD$ 100.00', 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('Otro Producto     RD$  50.50', 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from('-'.repeat(42), 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from([ESC, 0x45, 0x01]), // Bold
+      Buffer.from('TOTAL:            RD$ 150.50', 'ascii'),
+      Buffer.from([LF]),
+      Buffer.from([ESC, 0x45, 0x00]), // Bold off
+      Buffer.from([LF, LF, LF, LF]),
+      Buffer.from([GS, 0x56, 0x41, 0x03]), // Cut
+    ];
+    const rawData = Buffer.concat(testLines);
+    results.push(`  Bytes generados: ${rawData.length}`);
+    
+    const startTime = Date.now();
+    const result = await sendRawToPrinter(rawData, printerName);
+    const duration = Date.now() - startTime;
+    results.push(`  ÉXITO - Método: ${result.method} - Duración: ${duration}ms`);
+    results.push('  Si el recibo sale EN BLANCO, el problema es el driver/conexión.');
+    results.push('  Si imprime texto, el problema está en los datos del recibo.');
+  } catch (err) {
+    results.push(`  FALLO: ${err.message}`);
+    results.push('  El raw ESC/POS no funciona con esta impresora.');
+  }
+  
+  results.push('');
+  results.push('--- Resultado ---');
+  results.push('Revise el recibo impreso:');
+  results.push('- Si imprimió texto → El problema está en los datos del web app');
+  results.push('- Si salió en blanco → El problema es driver/conexión/modo');
+  results.push('');
+  results.push(`Log completo en: ${printLogger.getLogFilePath()}`);
+  
+  // Log the diagnostic
+  printLogger.logPrintResult({
+    success: true,
+    method: 'diagnostic',
+    printerName,
+    bytesWritten: 0,
+    duration: 0,
+  });
+  
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'Diagnóstico de Impresión',
+    message: 'Diagnóstico completado. Revise el recibo.',
+    detail: results.join('\n'),
+  });
+}
+
+// ─── IPC: Get Print Log ──────────────────────────────────────────────────────
+ipcMain.handle('get-print-log', async () => {
+  const { printLogger } = require('./hardware');
+  return {
+    lastLog: printLogger.getLastPrintLog(),
+    logPath: printLogger.getLogFilePath(),
+  };
+});
+
+// ─── IPC: Run Print Diagnostic ───────────────────────────────────────────────
+ipcMain.handle('run-print-diagnostic', async () => {
+  await runPrintDiagnostic();
+  return { success: true };
+});

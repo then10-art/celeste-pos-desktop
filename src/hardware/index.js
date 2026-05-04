@@ -9,6 +9,8 @@
  * Optimized for: AOKIA AK-3080 (80mm, USB, 250mm/s, ESC/POS)
  */
 
+const { logPrintStart, logConversion, logPrintResult, logPrinterDetection } = require('./printLogger');
+
 let printerConfig = { type: 'usb', address: '', printerName: '' };
 let mainWindowRef = null;
 
@@ -236,6 +238,28 @@ async function printReceipt(receiptData, paperSize) {
   const printerName = printerConfig.printerName || await getAutoDetectedPrinterName();
   console.log('[Hardware] printReceipt called, printerName:', printerName, 'type:', printerConfig.type, 'paperSize:', paperSize);
 
+  // Log printer detection info
+  let allPrinterNames = [];
+  if (mainWindowRef) {
+    try {
+      allPrinterNames = mainWindowRef.webContents.getPrinters().map(p => ({ name: p.name, status: p.status, isDefault: p.isDefault }));
+    } catch { /* ignore */ }
+  }
+  logPrinterDetection({
+    configuredName: printerConfig.printerName,
+    detectedName: printerName,
+    allPrinters: allPrinterNames,
+    printMode: 'raw',
+  });
+
+  // Log print start
+  logPrintStart({
+    printerName,
+    printMode: 'raw',
+    paperSize,
+    receiptData,
+  });
+
   // PRIMARY METHOD: Raw ESC/POS binary commands
   // This is the most reliable method for USB thermal receipt printers.
   // It bypasses the Windows GDI rendering pipeline entirely and sends
@@ -286,6 +310,23 @@ async function printRawEscPos(receiptData, printerName, paperSize) {
   const normalized = convertReceiptDataToLines(receiptData);
   const lines = normalized.lines || [];
   console.log('[Hardware] Converting receipt to ESC/POS, lines:', lines.length);
+
+  // Log conversion results for debugging
+  logConversion({
+    inputHadLines: !!receiptData.lines,
+    inputHadStoreNameAndItems: !!(receiptData.storeName && receiptData.items),
+    outputLineCount: lines.length,
+    sampleLines: lines.slice(0, 8).map(l => ({ type: l.type, text: l.text || l.label || '', value: l.value || '' })),
+    escPosBytes: 0, // will be updated after building
+  });
+
+  // CRITICAL: If no lines were generated, log error and abort
+  if (lines.length === 0) {
+    const errMsg = 'convertReceiptDataToLines produced 0 lines! Receipt data keys: ' + Object.keys(receiptData).join(', ');
+    console.error('[Hardware]', errMsg);
+    logPrintResult({ success: false, method: 'raw-escpos', error: errMsg, printerName });
+    throw new Error(errMsg);
+  }
 
   // Determine column width based on paper size (80mm = 42 chars, 58mm = 32 chars)
   const maxCols = (paperSize === '58') ? 32 : 42;
@@ -368,8 +409,38 @@ async function printRawEscPos(receiptData, printerName, paperSize) {
   const rawData = Buffer.concat(buffers);
   console.log('[Hardware] Built ESC/POS data:', rawData.length, 'bytes for', lines.length, 'lines');
 
+  // Log the byte count and first few bytes for debugging
+  logConversion({
+    inputHadLines: true,
+    inputHadStoreNameAndItems: true,
+    outputLineCount: lines.length,
+    sampleLines: [],
+    escPosBytes: rawData.length,
+  });
+
   // Send raw data to printer via Windows spooler
-  return await sendRawToPrinter(rawData, printerName);
+  const startTime = Date.now();
+  try {
+    const result = await sendRawToPrinter(rawData, printerName);
+    logPrintResult({
+      success: true,
+      method: result.method || 'raw-escpos',
+      printerName,
+      bytesWritten: rawData.length,
+      duration: Date.now() - startTime,
+    });
+    return result;
+  } catch (err) {
+    logPrintResult({
+      success: false,
+      method: 'raw-escpos',
+      error: err.message,
+      printerName,
+      bytesWritten: 0,
+      duration: Date.now() - startTime,
+    });
+    throw err;
+  }
 }
 
 // ─── Send Raw Bytes to Printer (shared by print and cash drawer) ─────────────
@@ -1020,4 +1091,4 @@ async function openCashDrawer() {
   }
 }
 
-module.exports = { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName };
+module.exports = { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName, printLogger: require('./printLogger') };
