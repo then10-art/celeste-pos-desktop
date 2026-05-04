@@ -678,8 +678,19 @@ async function getAutoDetectedPrinterName() {
   if (!mainWindowRef) return null;
   try {
     const printers = mainWindowRef.webContents.getPrinters();
+    // 1st: dedicated receipt/thermal printer by name pattern
     const receipt = findReceiptPrinter(printers);
-    return receipt?.name || null;
+    if (receipt) return receipt.name;
+    // 2nd: system default printer (works even if it's an inkjet)
+    const defaultPrinter = printers.find(p => p.isDefault);
+    if (defaultPrinter && !EXCLUDED_PATTERNS.some(rx => rx.test(defaultPrinter.name))) {
+      console.log('[Hardware] No receipt printer found, using system default:', defaultPrinter.name);
+      return defaultPrinter.name;
+    }
+    // 3rd: any non-excluded printer
+    const anyPrinter = printers.find(p => !EXCLUDED_PATTERNS.some(rx => rx.test(p.name)));
+    if (anyPrinter) return anyPrinter.name;
+    return null;
   } catch {
     return null;
   }

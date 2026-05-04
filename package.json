@@ -1,6 +1,6 @@
 {
   "name": "celeste-pos-desktop",
-  "version": "1.9.2",
+  "version": "2.0.0",
   "description": "Celeste POS - Desktop Application for Windows",
   "main": "src/main.js",
   "author": "Celeste POS",
@@ -34,7 +34,7 @@
   "build": {
     "appId": "com.celestepos.desktop",
     "productName": "Celeste POS",
-    "copyright": "Copyright \u00a9 2024 Celeste POS",
+    "copyright": "Copyright © 2024 Celeste POS",
     "icon": "assets/icon.ico",
     "asar": true,
     "asarUnpack": [

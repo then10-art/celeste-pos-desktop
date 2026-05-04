@@ -177,18 +177,12 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
 
       const tenantName = tenantData.name;
 
-      // Save the tenant code and mark setup as complete
+      // Save the tenant code — do NOT mark setupComplete yet (printer step comes next)
       store.set('tenantSlug', slug);
       store.set('tenantName', tenantName);
-      store.set('setupComplete', true);
+      // setupComplete will be set by setup-finish after printer config
 
-      console.log(`[Setup] Tenant configured: ${slug} (${tenantName})`);
-
-      // Close setup window and launch main app
-      if (setupWindow) {
-        setupWindow.close();
-      }
-      launchMainApp();
+      console.log(`[Setup] Tenant validated: ${slug} (${tenantName}) — proceeding to printer setup`);
 
       return { success: true, tenantName };
     } else {
@@ -210,20 +204,104 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
     if (offlineResponse === 0) {
       store.set('tenantSlug', slug);
       store.set('tenantName', slug.toUpperCase());
-      store.set('setupComplete', true);
+      // setupComplete will be set by setup-finish after printer config
 
-      console.log(`[Setup] Tenant configured (offline): ${slug}`);
-
-      if (setupWindow) {
-        setupWindow.close();
-      }
-      launchMainApp();
+      console.log(`[Setup] Tenant validated (offline): ${slug} — proceeding to printer setup`);
 
       return { success: true, tenantName: slug.toUpperCase() };
     }
 
     return { success: false, error: 'Operación cancelada.' };
   }
+});
+
+// ─── IPC: Printer Setup (Step 2 of setup wizard) ────────────────────────────
+ipcMain.handle('setup-get-printers', async () => {
+  try {
+    return await getAvailablePrinters();
+  } catch (err) {
+    console.error('[Setup] getAvailablePrinters error:', err.message);
+    return [];
+  }
+});
+
+ipcMain.handle('setup-test-print', async (event, { printerName, paperSize, printMode }) => {
+  try {
+    const os = require('os');
+    const fs = require('fs');
+    const pathMod = require('path');
+    const { BrowserWindow: BW } = require('electron');
+    const width = paperSize === '58' ? '58mm' : '80mm';
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+@page { margin: 0; size: ${width} auto; }
+body { font-family: monospace; font-size: 12px; width: ${width}; padding: 4mm; }
+h2 { text-align: center; font-size: 14px; margin-bottom: 4px; }
+p { margin: 2px 0; }
+.center { text-align: center; }
+.divider { border-top: 1px dashed #000; margin: 6px 0; }
+</style></head><body>
+<h2>CELESTE POS</h2>
+<p class="center">Prueba de Impresora</p>
+<div class="divider"></div>
+<p>Impresora: ${printerName}</p>
+<p>Papel: ${width}</p>
+<p>Modo: ${printMode === 'raw' ? 'Directo ESC/POS' : 'Windows GDI'}</p>
+<p>Fecha: ${new Date().toLocaleString('es-DO')}</p>
+<div class="divider"></div>
+<p class="center">Impresora funcionando</p>
+<p class="center">correctamente.</p>
+<br><br><br>
+</body></html>`;
+    const tmpFile = pathMod.join(os.tmpdir(), 'celeste-setup-test.html');
+    fs.writeFileSync(tmpFile, html, 'utf8');
+    const printWin = new BW({ show: false, webPreferences: { javascript: false } });
+    await printWin.loadFile(tmpFile);
+    await new Promise((resolve, reject) => {
+      printWin.webContents.print(
+        { silent: true, deviceName: printerName, printBackground: true },
+        (success, errType) => {
+          printWin.close();
+          if (success) resolve();
+          else reject(new Error(errType || 'print failed'));
+        }
+      );
+    });
+    return { success: true };
+  } catch (err) {
+    console.error('[Setup] testPrint error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('setup-save-printer', async (event, config) => {
+  try {
+    const { printerName, paperSize, printMode } = config;
+    const printerConfig = {
+      type: 'usb',
+      address: '',
+      printerName: printerName || '',
+      paperSize: paperSize || '80',
+      printMode: printMode || 'gdi',
+    };
+    store.set('printerConfig', printerConfig);
+    // Also save printMode at top level (where print-receipt handler reads it)
+    store.set('printMode', printMode || 'gdi');
+    console.log('[Setup] Printer config saved:', printerConfig);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('setup-finish', async () => {
+  store.set('setupComplete', true);
+  console.log('[Setup] Setup complete — launching main app');
+  if (setupWindow) {
+    setupWindow.close();
+  }
+  await launchMainApp();
+  return { success: true };
 });
 
 // ─── Main App Launch ─────────────────────────────────────────────────────────
@@ -1290,6 +1368,8 @@ ipcMain.handle('get-available-printers', async () => {
 
 ipcMain.handle('save-printer-config', (event, config) => {
   store.set('printerConfig', config);
+  // Also persist printMode at top level (where print-receipt handler reads it)
+  if (config.printMode) store.set('printMode', config.printMode);
   // Re-initialize hardware with new config, passing mainWindow for system printer access
   setupHardware(config, mainWindow);
   return true;
