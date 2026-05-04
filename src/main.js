@@ -1106,8 +1106,8 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   }
 
   // Determine print mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
-  // Default is 'gdi' because most Windows-installed thermal printers use GDI drivers
-  const printMode = store.get('printMode') || 'gdi';
+  // Default is 'raw' (ESC/POS) - most reliable for USB thermal printers on all Windows versions
+  const printMode = store.get('printMode') || 'raw';
   const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
   console.log('[IPC] print-receipt mode:', printMode, 'printer:', printerName, 'paperSize:', paperSize);
 
@@ -1188,7 +1188,7 @@ ipcMain.handle('set-print-mode', (event, mode) => {
 });
 
 ipcMain.handle('get-print-mode', () => {
-  return store.get('printMode') || 'gdi';
+  return store.get('printMode') || 'raw';
 });
 
 ipcMain.handle('save-label-printer', (event, printerName) => {

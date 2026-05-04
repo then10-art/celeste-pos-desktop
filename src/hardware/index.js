@@ -386,17 +386,19 @@ async function sendRawToPrinter(rawData, printerName) {
   fs.writeFileSync(tmpFile, rawData);
 
   const errors = [];
-  const safePrinterName = printerName.replace(/'/g, "''");
-  const safeTmpFile = tmpFile.replace(/\\/g, '\\\\');
+  // Escape for PowerShell single-quoted strings (single quotes only)
+  const psPrinterName = printerName.replace(/'/g, "''");
+  // For PowerShell file path: use the raw Windows path (backslashes as-is)
+  const psTmpFile = tmpFile; // PowerShell handles Windows paths natively
 
-  // Method 0: PowerShell RawPrinter P/Invoke (most reliable on Win8+)
-  // This opens the printer handle directly and writes raw bytes - bypasses all rendering
+  // Method 0: PowerShell RawPrinter P/Invoke (Win32 API - works on Win7/8/10/11)
+  // Uses winspool.drv directly - most reliable for USB printers with proper drivers
   try {
     console.log('[Hardware] Method 0: PowerShell RawPrinter P/Invoke');
     const psScript = `
 $ErrorActionPreference = 'Stop'
-$printerName = '${safePrinterName}'
-$filePath = '${safeTmpFile}'
+$printerName = '${psPrinterName}'
+$filePath = '${psTmpFile}'
 $bytes = [System.IO.File]::ReadAllBytes($filePath)
 Add-Type -TypeDefinition @"
 using System;
@@ -429,7 +431,8 @@ $ok = [RawPrinterHelper]::SendRaw($printerName, $bytes)
 if ($ok) { Write-Output 'OK' } else { throw 'WritePrinter failed - check printer name and connection' }
 `;
     const psFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.ps1`);
-    fs.writeFileSync(psFile, psScript, 'utf-8');
+    // Write PS1 as UTF-8 with BOM so PowerShell reads it correctly on all locales
+    fs.writeFileSync(psFile, '\uFEFF' + psScript, 'utf-8');
     const result = execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, {
       timeout: 15000, encoding: 'utf-8', windowsHide: true,
     });
@@ -438,45 +441,56 @@ if ($ok) { Write-Output 'OK' } else { throw 'WritePrinter failed - check printer
     try { fs.unlinkSync(tmpFile); } catch { }
     return { success: true, method: 'ps-pinvoke' };
   } catch (err) {
-    errors.push(`PowerShell P/Invoke: ${err.message}`);
-    console.warn('[Hardware] Method 0 failed:', err.message);
+    errors.push(`PowerShell P/Invoke: ${err.message.substring(0, 200)}`);
+    console.warn('[Hardware] Method 0 failed:', err.message.substring(0, 300));
   }
 
-  // Method 1: NET USE + COPY (most reliable on Windows 7)
+  // Method 1: BAT file with SET variables - handles spaces in printer names on Windows 7
+  // Uses environment variables to avoid CMD quoting issues with UNC paths containing spaces
   try {
-    console.log('[Hardware] Method 1: NET USE LPT3 + COPY /B');
-    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
-    execSync(`net use LPT3: "\\\\localhost\\${printerName}" /persistent:no`, {
-      timeout: 8000, shell: 'cmd.exe', windowsHide: true,
-    });
-    execSync(`copy /b "${tmpFile}" LPT3:`, {
-      timeout: 10000, shell: 'cmd.exe', windowsHide: true,
-    });
-    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
-    console.log('[Hardware] Raw print via NET USE + COPY succeeded');
+    console.log('[Hardware] Method 1: BAT file NET USE + COPY /B (Windows 7 compatible)');
+    const batFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.bat`);
+    const batScript = `@echo off
+SET SRCFILE=${tmpFile}
+SET PRINTER=${printerName}
+net use LPT4: /delete /y >nul 2>&1
+net use LPT4: "\\\\localhost\\%PRINTER%" /persistent:no
+if errorlevel 1 goto copyshare
+copy /b "%SRCFILE%" LPT4:
+net use LPT4: /delete /y >nul 2>&1
+goto done
+:copyshare
+copy /b "%SRCFILE%" "\\\\localhost\\%PRINTER%"
+:done
+`;
+    fs.writeFileSync(batFile, batScript, 'ascii');
+    execSync(`"${batFile}"`, { timeout: 15000, shell: 'cmd.exe', windowsHide: true });
+    try { fs.unlinkSync(batFile); } catch { }
+    console.log('[Hardware] Raw print via BAT NET USE + COPY succeeded');
     try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true, method: 'net-use-copy' };
+    return { success: true, method: 'bat-net-use-copy' };
   } catch (err) {
-    errors.push(`NET USE: ${err.message}`);
-    console.warn('[Hardware] Method 1 failed:', err.message);
-    try { execSync('net use LPT3: /delete /y 2>nul', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
+    errors.push(`BAT NET USE: ${err.message.substring(0, 200)}`);
+    console.warn('[Hardware] Method 1 failed:', err.message.substring(0, 300));
+    try { execSync('net use LPT4: /delete /y >nul 2>&1', { shell: 'cmd.exe', windowsHide: true, timeout: 5000 }); } catch { /* ignore */ }
   }
 
-  // Method 2: copy /b to printer share (requires printer sharing enabled)
+  // Method 2: PowerShell copy to UNC share (handles spaces via PS string handling)
   try {
-    console.log('[Hardware] Method 2: copy /b to printer share');
-    execSync(`copy /b "${tmpFile}" "\\\\localhost\\${printerName}"`, {
-      timeout: 10000, encoding: 'utf-8', shell: 'cmd.exe', windowsHide: true,
+    console.log('[Hardware] Method 2: PowerShell Copy-Item to UNC share');
+    const psShare = `Copy-Item -Path '${psTmpFile}' -Destination '\\\\localhost\\${psPrinterName}' -Force`;
+    execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psShare}"`, {
+      timeout: 12000, encoding: 'utf-8', windowsHide: true,
     });
-    console.log('[Hardware] Raw print via copy /b succeeded');
+    console.log('[Hardware] Raw print via PowerShell Copy-Item succeeded');
     try { fs.unlinkSync(tmpFile); } catch { }
-    return { success: true, method: 'copy-share' };
+    return { success: true, method: 'ps-copy-share' };
   } catch (err) {
-    errors.push(`copy /b: ${err.message}`);
-    console.warn('[Hardware] Method 2 failed:', err.message);
+    errors.push(`PS Copy-Item: ${err.message.substring(0, 200)}`);
+    console.warn('[Hardware] Method 2 failed:', err.message.substring(0, 300));
   }
 
-  // Method 3: print /d: command
+  // Method 3: print /d: command (works when printer name has no spaces)
   try {
     console.log('[Hardware] Method 3: print /d: command');
     execSync(`print /d:"${printerName}" "${tmpFile}"`, {
@@ -486,8 +500,8 @@ if ($ok) { Write-Output 'OK' } else { throw 'WritePrinter failed - check printer
     try { fs.unlinkSync(tmpFile); } catch { }
     return { success: true, method: 'print-d' };
   } catch (err) {
-    errors.push(`print /d: ${err.message}`);
-    console.warn('[Hardware] Method 3 failed:', err.message);
+    errors.push(`print /d: ${err.message.substring(0, 200)}`);
+    console.warn('[Hardware] Method 3 failed:', err.message.substring(0, 300));
   }
 
   // Method 4: lpr command (available with LPR feature enabled)
@@ -500,8 +514,8 @@ if ($ok) { Write-Output 'OK' } else { throw 'WritePrinter failed - check printer
     try { fs.unlinkSync(tmpFile); } catch { }
     return { success: true, method: 'lpr' };
   } catch (err) {
-    errors.push(`lpr: ${err.message}`);
-    console.warn('[Hardware] Method 4 failed:', err.message);
+    errors.push(`lpr: ${err.message.substring(0, 200)}`);
+    console.warn('[Hardware] Method 4 failed:', err.message.substring(0, 300));
   }
 
   // All methods failed
