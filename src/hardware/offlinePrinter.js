@@ -24,16 +24,23 @@ async function printReceiptGDI(receiptData, printerName, paperSize = '80') {
   const maxCols = (paperSize === '58') ? 32 : 42;
   const widthMm = (paperSize === '58') ? 58 : 80;
   const fontSize = (paperSize === '58') ? '10pt' : '12pt';
+  // Line height in mm at 12pt with 1.3 line-height:
+  // 12pt = 4.23mm, × 1.3 = ~5.5mm per line. Add 4mm padding top+bottom.
+  const lineHeightMm = (paperSize === '58') ? 4.8 : 5.5;
+  const paddingMm = 4;
 
   // Build plain text receipt
   const textLines = buildReceiptText(receiptData, maxCols);
   const textContent = textLines.join('\n');
 
+  // Calculate receipt height from line count so the paper cuts at the right place
+  const receiptHeightMm = Math.ceil(textLines.length * lineHeightMm) + paddingMm + 20; // +20mm feed
+
   // Wrap in minimal HTML with Courier New (like Eleventa uses)
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@page { margin: 0; size: ${widthMm}mm auto; }
+@page { margin: 0; size: ${widthMm}mm ${receiptHeightMm}mm; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: 'Courier New', 'Lucida Console', monospace;
@@ -57,7 +64,8 @@ pre {
 <pre>${escapeHtml(textContent)}</pre>
 </body></html>`;
 
-  return await printHTMLDocument(html, printerName, widthMm);
+  console.log(`[ReceiptGDI] ${textLines.length} lines → ${receiptHeightMm}mm height, printer: ${printerName}`);
+  return await printHTMLDocument(html, printerName, widthMm, receiptHeightMm);
 }
 
 // ─── GDI Label Printing (Windows Driver) ────────────────────────────────────
@@ -207,12 +215,16 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
     const tmpFile = path.join(os.tmpdir(), `celeste-print-${Date.now()}.html`);
     fs.writeFileSync(tmpFile, html, 'utf-8');
 
-    // Use a LARGE BrowserWindow so the HTML renders at full fidelity
-    // The print system handles scaling to the actual paper size
+    // BrowserWindow width MUST match the paper width in pixels (at 96dpi).
+    // If the window is wider than the paper, Chromium scales content down and
+    // the text becomes invisible (too small to print). Match width exactly.
+    const pxWidth = Math.max(200, Math.round(widthMm * 96 / 25.4));
+    // For receipts (no heightMm), use a tall window to fit all content without clipping
+    const pxHeight = heightMm ? Math.round(heightMm * 96 / 25.4) : 2000;
     const printWin = new BrowserWindow({
       show: false,
-      width: 800,
-      height: 600,
+      width: pxWidth,
+      height: pxHeight,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
