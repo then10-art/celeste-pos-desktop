@@ -71,6 +71,8 @@ const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getR
 const { syncWithCloud, checkCloudHealth } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName } = require('./hardware');
 const { printReceiptGDI, printLabelGDI, printLabelsGDI } = require('./hardware/offlinePrinter');
+const { printReceiptBitmap } = require('./hardware/bitmapPrinter');
+const { generateReceiptHTMLForBitmap } = require('./hardware/receiptHtmlGenerator');
 const { startLocalServer } = require('./local-server');
 
 // ─── Local Server State ──────────────────────────────────────────────────────
@@ -1260,8 +1262,28 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   const hasLines = !!receiptData?.lines;
   console.log(`[IPC] Receipt data: storeName=${hasStoreName}, items=${itemCount}, lines=${hasLines}, type=${receiptData?.type || 'sale'}`);
 
-  if (printMode === 'gdi') {
-    // PRIMARY: GDI mode (Windows Driver) - most compatible, like Eleventa
+  if (printMode === 'bitmap') {
+    // BITMAP mode: Render HTML to high-contrast bitmap, send as ESC/POS raster
+    // Best quality - looks identical to web app preview with logo, icons, formatting
+    try {
+      console.log('[IPC] Starting BITMAP print...');
+      const html = generateReceiptHTMLForBitmap(receiptData, paperSize);
+      const result = await printReceiptBitmap(html, printerName, paperSize, sendRawToPrinter);
+      console.log('[IPC] print-receipt BITMAP result:', JSON.stringify(result));
+      return result;
+    } catch (err) {
+      console.warn('[IPC] BITMAP print failed:', err.message, '- trying GDI fallback');
+      // Fallback to GDI
+      try {
+        const result = await printReceiptGDI(receiptData, printerName, paperSize);
+        return result;
+      } catch (err2) {
+        console.error('[IPC] Both BITMAP and GDI failed:', err2.message);
+        return { success: false, error: `Bitmap: ${err.message} | GDI: ${err2.message}` };
+      }
+    }
+  } else if (printMode === 'gdi') {
+    // GDI mode (Windows Driver) - compatible with manufacturer drivers
     try {
       console.log('[IPC] Starting GDI print...');
       const result = await printReceiptGDI(receiptData, printerName, paperSize);
@@ -1331,7 +1353,7 @@ ipcMain.handle('print-label-offline', async (event, { labelData, printerName, wi
 
 // ─── Print Mode Setting ─────────────────────────────────────────────────────
 ipcMain.handle('set-print-mode', (event, mode) => {
-  // mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
+  // mode: 'bitmap' (HD raster image) or 'gdi' (Windows Driver) or 'raw' (ESC/POS)
   store.set('printMode', mode);
   console.log('[IPC] Print mode set to:', mode);
   return true;
