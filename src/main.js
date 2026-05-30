@@ -455,7 +455,21 @@ function createWindow() {
     url = `${CLOUD_URL}/t/${tenantSlug}`;
     console.log(`[App] Loading tenant from cloud: ${tenantSlug} → ${url}`);
   }
-  mainWindow.loadURL(url);
+  // Add cache-busting timestamp and disable caching headers
+  const cacheBustUrl = `${url}${url.includes('?') ? '&' : '?'}_cb=${Date.now()}`;
+  mainWindow.loadURL(cacheBustUrl, {
+    extraHeaders: 'pragma: no-cache\nCache-Control: no-cache, no-store, must-revalidate\n'
+  });
+
+  // Intercept all requests to add no-cache headers for HTML/JS/CSS
+  mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
+    { urls: ['https://*.live/*', 'https://*.manus.space/*'] },
+    (details, callback) => {
+      details.requestHeaders['Cache-Control'] = 'no-cache';
+      details.requestHeaders['Pragma'] = 'no-cache';
+      callback({ requestHeaders: details.requestHeaders });
+    }
+  );
 
   // Show window when ready
   mainWindow.once('ready-to-show', () => {
@@ -2095,21 +2109,25 @@ function showAbout() {
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
-  // Clear web cache on version update to ensure latest UI loads
+  // ALWAYS clear ALL web cache on startup to ensure latest UI loads
   const { session } = require('electron');
   const currentVersion = require('../package.json').version;
   const lastVersion = store.get('lastAppVersion', '');
-  if (lastVersion !== currentVersion) {
-    console.log(`[App] Version changed ${lastVersion} → ${currentVersion}, clearing cache...`);
-    try {
-      await session.defaultSession.clearCache();
-      await session.defaultSession.clearStorageData({ storages: ['cachestorage', 'serviceworkers'] });
-      console.log('[App] Cache cleared successfully');
-    } catch (e) {
-      console.log('[App] Cache clear failed:', e.message);
-    }
-    store.set('lastAppVersion', currentVersion);
+  console.log(`[App] v${currentVersion} starting (last: ${lastVersion}). Clearing ALL cache...`);
+  try {
+    // Clear HTTP cache
+    await session.defaultSession.clearCache();
+    // Clear all storage types: localStorage, sessionStorage, indexeddb, websql, serviceworkers, cachestorage
+    await session.defaultSession.clearStorageData({
+      storages: ['appcache', 'filesystem', 'indexdb', 'localstorage', 'shadercache', 'websql', 'serviceworkers', 'cachestorage']
+    });
+    // Also clear code caches
+    await session.defaultSession.clearCodeCaches({});
+    console.log('[App] ALL cache cleared successfully');
+  } catch (e) {
+    console.log('[App] Cache clear error (non-fatal):', e.message);
   }
+  store.set('lastAppVersion', currentVersion);
 
   // Initialize local database
   await initDatabase();
