@@ -78,6 +78,8 @@ function renderHTMLToBitmap(html, targetWidth) {
     const tmpFile = path.join(os.tmpdir(), `celeste-bitmap-${Date.now()}.html`);
     
     // Inject CSS to force exact width and high contrast
+    // NOTE: Do NOT override font sizes here — they are carefully calibrated
+    // in receiptHtmlGenerator.js for 203 DPI thermal printing
     const enhancedHtml = html.replace('</head>', `
       <style>
         /* Force high contrast for thermal printing */
@@ -86,19 +88,11 @@ function renderHTMLToBitmap(html, targetWidth) {
           width: ${targetWidth}px !important; 
           max-width: ${targetWidth}px !important;
           margin: 0 !important;
-          padding: 8px !important;
+          padding: 16px !important;
           background: #fff !important;
           color: #000 !important;
-          font-weight: bold !important;
         }
-        /* Make all text bolder for thermal print clarity */
-        p, span, td, th, div, li { font-weight: bold !important; }
-        .store-name { font-weight: 900 !important; font-size: 20px !important; }
-        .total-row { font-weight: 900 !important; }
-        /* Ensure borders are solid black */
-        .divider { border-top: 2px solid #000 !important; }
-        .divider-double { border-top: 3px solid #000 !important; }
-        /* Remove any grey text - make everything black */
+        /* Ensure all text is black */
         * { color: #000 !important; }
         /* Ensure images render at high quality */
         img { image-rendering: -webkit-optimize-contrast; }

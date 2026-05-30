@@ -1413,6 +1413,12 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   const hasStoreName = !!receiptData?.storeName;
   const hasLines = !!receiptData?.lines;
   console.log(`[IPC] Receipt data: storeName=${hasStoreName}, items=${itemCount}, lines=${hasLines}, type=${receiptData?.type || 'sale'}`);
+  if (itemCount > 0) {
+    console.log(`[IPC] Receipt items[0]: ${JSON.stringify(receiptData.items[0])}`);
+  } else {
+    console.warn('[IPC] WARNING: Receipt has 0 items! Full data keys:', Object.keys(receiptData || {}).join(', '));
+    console.warn('[IPC] Receipt data snapshot:', JSON.stringify(receiptData).substring(0, 500));
+  }
 
   if (printMode === 'bitmap') {
     // BITMAP mode: Render HTML to high-contrast bitmap, send as ESC/POS raster
