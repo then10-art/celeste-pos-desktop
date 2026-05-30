@@ -19,7 +19,7 @@
     <script type="module" crossorigin src="/assets/index-CZLhcobO.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-BAFYvcYO.css">
   <meta property="og:type" content="website">
-		<meta property="og:url" content="https://celestepos.live/index.html">
+		<meta property="og:url" content="https://celestepos.live/assets/DqSqL2-e.js">
 		<meta property="og:title" content="Celeste POS">
 		<meta property="og:description" content="A comprehensive web-based POS, inventory, purchasing, and accounting-lite system for a Dominican Republic supermarket. Features include barcode scanning, NCF fiscal compliance, role-based access (admin/manager/cashier), vendor management, shift management, receipt printing, and Spanish-first UI.">
 		<meta property="og:image" content="https://files.manuscdn.com/webdev_screenshots/2026/05/30/cBBtMHx9r7SdeZdZoTmNPS.png?x-oss-process=image/resize,w_1200/crop,h_630,x_0,y_0">
@@ -30,7 +30,7 @@
 		<meta name="twitter:description" content="A comprehensive web-based POS, inventory, purchasing, and accounting-lite system for a Dominican Republic supermarket. Features include barcode scanning, NCF fiscal compliance, role-based access (admin/manager/cashier), vendor management, shift management, receipt printing, and Spanish-first UI.">
 		<meta name="twitter:image" content="https://files.manuscdn.com/webdev_screenshots/2026/05/30/cBBtMHx9r7SdeZdZoTmNPS.png?x-oss-process=image/resize,w_1200/crop,h_630,x_0,y_0">
 		<meta name="twitter:image:width" content="1200">
-		<meta name="twitter:image:height" content="630"><link rel="canonical" href="https://celestepos.live/index.html" /></head>
+		<meta name="twitter:image:height" content="630"><link rel="canonical" href="https://celestepos.live/assets/DqSqL2-e.js" /></head>
 
   <body>
     <script id="manus-runtime">window.__MANUS_HOST_DEV__ = false;
@@ -95,7 +95,7 @@ Error generating stack: `+l.message+`
 
     <div id="root"></div>
     <script>
-      if (false && 'serviceWorker' in navigator) {
+      if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js').catch(() => {});
         });
@@ -103,6 +103,8 @@ Error generating stack: `+l.message+`
     </script>
     <script
       defer
+      src="https://manus-analytics.com/umami"
+      data-website-id="145b13f4-08d5-4177-a10e-1440cb98bc90"></script>
   </body>
 
 </html>

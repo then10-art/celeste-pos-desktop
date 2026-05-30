@@ -222,8 +222,65 @@ async function downloadWebappUpdate(store, onProgress) {
       onProgress?.(`Descargando... ${downloaded}/${allFiles.length}`);
     }
     
+    // Now scan the main JS bundle for lazy-loaded chunks
+    const mainJsFiles = fs.readdirSync(assetsDir).filter(f => f.startsWith('index-') && f.endsWith('.js'));
+    if (mainJsFiles.length > 0) {
+      const mainJsContent = fs.readFileSync(path.join(assetsDir, mainJsFiles[0]), 'utf-8');
+      const chunkMatches = mainJsContent.match(/[A-Za-z0-9_]+-[A-Za-z0-9_]+\.js/g) || [];
+      const uniqueChunks = [...new Set(chunkMatches)].filter(c => !fs.existsSync(path.join(assetsDir, c)));
+      
+      onProgress?.(`Descargando ${uniqueChunks.length} módulos adicionales...`);
+      console.log(`[WebappUpdater] Found ${uniqueChunks.length} lazy-loaded chunks to download`);
+      
+      let chunkDownloaded = 0;
+      for (let i = 0; i < uniqueChunks.length; i += 10) {
+        const batch = uniqueChunks.slice(i, i + 10);
+        const results = await Promise.allSettled(
+          batch.map(async (chunk) => {
+            const url = `${CLOUD_URL}/assets/${chunk}`;
+            const buffer = await fetchBuffer(url, 30000);
+            fs.writeFileSync(path.join(assetsDir, chunk), buffer);
+            return chunk;
+          })
+        );
+        results.forEach((r) => {
+          if (r.status === 'fulfilled') chunkDownloaded++;
+        });
+        onProgress?.(`Módulos: ${chunkDownloaded}/${uniqueChunks.length}`);
+      }
+      
+      // Second pass: scan downloaded chunks for nested references (CSS, etc)
+      const allJsFiles = fs.readdirSync(assetsDir).filter(f => f.endsWith('.js'));
+      const nestedSet = new Set();
+      for (const jsFile of allJsFiles) {
+        const content = fs.readFileSync(path.join(assetsDir, jsFile), 'utf-8');
+        const nested = content.match(/[A-Za-z0-9_]+-[A-Za-z0-9_]+\.(js|css)/g) || [];
+        nested.forEach(n => {
+          if (!fs.existsSync(path.join(assetsDir, n))) nestedSet.add(n);
+        });
+      }
+      
+      if (nestedSet.size > 0) {
+        console.log(`[WebappUpdater] Downloading ${nestedSet.size} nested assets...`);
+        const nestedArr = [...nestedSet];
+        for (let i = 0; i < nestedArr.length; i += 10) {
+          const batch = nestedArr.slice(i, i + 10);
+          await Promise.allSettled(
+            batch.map(async (file) => {
+              try {
+                const buffer = await fetchBuffer(`${CLOUD_URL}/assets/${file}`, 30000);
+                fs.writeFileSync(path.join(assetsDir, file), buffer);
+              } catch { /* skip */ }
+            })
+          );
+        }
+      }
+      
+      console.log(`[WebappUpdater] Chunk download complete: ${chunkDownloaded} chunks`);
+    }
+    
     if (failed > allFiles.length * 0.2) {
-      // More than 20% failed — don't use this update
+      // More than 20% of core files failed — don't use this update
       console.error(`[WebappUpdater] Too many failures (${failed}/${allFiles.length}), aborting update`);
       return false;
     }
