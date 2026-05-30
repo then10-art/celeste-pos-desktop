@@ -123,7 +123,9 @@ function createSetupWindow() {
           validateAndSave: (code) => ipcRenderer.invoke('setup-validate-tenant', code),
           getAvailablePrinters: () => ipcRenderer.invoke('setup-get-printers'),
           testPrint: (printerName, paperSize, printMode) => ipcRenderer.invoke('setup-test-print', { printerName, paperSize, printMode }),
+          testLabelPrint: (printerName) => ipcRenderer.invoke('setup-test-label-print', { printerName }),
           savePrinterSetup: (config) => ipcRenderer.invoke('setup-save-printer', config),
+          saveLabelPrinter: (printerName) => ipcRenderer.invoke('setup-save-label-printer', printerName),
           finishSetup: () => ipcRenderer.invoke('setup-finish'),
         };
         console.log('[Setup] Bridge injected successfully');
@@ -307,6 +309,29 @@ ipcMain.handle('setup-save-printer', async (event, config) => {
     console.log('[Setup] Printer config saved:', printerConfig);
     return { success: true };
   } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('setup-save-label-printer', (event, printerName) => {
+  store.set('labelPrinterName', printerName || '');
+  console.log('[Setup] Label printer saved:', printerName);
+  return { success: true };
+});
+
+ipcMain.handle('setup-test-label-print', async (event, { printerName }) => {
+  try {
+    const labelData = {
+      productName: 'PRODUCTO PRUEBA',
+      price: 99.99,
+      barcode: '7501234567890',
+      storeName: store.get('tenantName') || 'CELESTE POS',
+      date: new Date().toLocaleDateString('es-DO'),
+    };
+    const result = await printLabelGDI(labelData, printerName, 37.3, 28.6);
+    return result;
+  } catch (err) {
+    console.error('[Setup] testLabelPrint error:', err.message);
     return { success: false, error: err.message };
   }
 });
@@ -1240,8 +1265,13 @@ function checkForUpdates(showNoUpdateDialog = false) {
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
 ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   // Handle label printing (pre-built HTML with custom page size)
+  // Labels ONLY go to the label printer - never to the receipt printer
   if (paperSize === 'label' && receiptData.html) {
-    return await printLabelHTML(receiptData.html, store.get('labelPrinterName') || store.get('printerConfig.printerName'), receiptData.widthMm, receiptData.heightMm);
+    const labelPrinter = store.get('labelPrinterName');
+    if (!labelPrinter) {
+      return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
+    }
+    return await printLabelHTML(receiptData.html, labelPrinter, receiptData.widthMm, receiptData.heightMm);
   }
 
   // Handle raw HTML string passed from CashierClosing/Cuadre pages
@@ -1336,14 +1366,24 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
 });
 
 // ─── Label Printing (HTML with @page size) ──────────────────────────────────
+// Labels ONLY go to the label printer. If no label printer is configured, return error.
 ipcMain.handle('print-label', async (event, { html, printerName, widthMm, heightMm }) => {
-  const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
+  const labelPrinter = store.get('labelPrinterName');
+  const name = printerName || labelPrinter;
+  if (!name) {
+    return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
+  }
   return await printLabelHTML(html, name, widthMm, heightMm);
 });
 
 // ─── Offline Label Printing (structured data, no HTML from web app) ─────────
+// Labels ONLY go to the label printer. Never fall back to receipt printer.
 ipcMain.handle('print-labels-offline', async (event, { labels, printerName, widthMm, heightMm }) => {
-  const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
+  const labelPrinter = store.get('labelPrinterName');
+  const name = printerName || labelPrinter;
+  if (!name) {
+    return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
+  }
   console.log('[IPC] print-labels-offline:', labels.length, 'labels to:', name);
   try {
     const result = await printLabelsGDI(labels, name, widthMm || 37.3, heightMm || 28.6);
@@ -1355,7 +1395,11 @@ ipcMain.handle('print-labels-offline', async (event, { labels, printerName, widt
 });
 
 ipcMain.handle('print-label-offline', async (event, { labelData, printerName, widthMm, heightMm }) => {
-  const name = printerName || store.get('labelPrinterName') || store.get('printerConfig.printerName');
+  const labelPrinter = store.get('labelPrinterName');
+  const name = printerName || labelPrinter;
+  if (!name) {
+    return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
+  }
   console.log('[IPC] print-label-offline:', labelData.productName, 'to:', name);
   try {
     const result = await printLabelGDI(labelData, name, widthMm || 37.3, heightMm || 28.6);

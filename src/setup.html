@@ -20,8 +20,10 @@
       border-radius: 16px;
       box-shadow: 0 4px 24px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.04);
       padding: 40px 36px;
-      max-width: 460px;
+      max-width: 520px;
       width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
     }
     .logo {
       width: 64px; height: 64px;
@@ -45,7 +47,7 @@
     }
     .step-dot.active { border-color: #2563eb; color: #2563eb; background: #eff6ff; }
     .step-dot.done { border-color: #16a34a; color: #fff; background: #16a34a; }
-    .step-line { flex: 1; height: 2px; background: #e5e7eb; max-width: 60px; }
+    .step-line { flex: 1; height: 2px; background: #e5e7eb; max-width: 40px; }
     .step-line.done { background: #16a34a; }
     .step-label { font-size: 11px; color: #6b7280; text-align: center; margin-top: 4px; }
 
@@ -102,7 +104,7 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     /* Printer list */
-    .printer-list { border: 1.5px solid #e5e7eb; border-radius: 10px; overflow: hidden; margin-bottom: 16px; }
+    .printer-list { border: 1.5px solid #e5e7eb; border-radius: 10px; overflow: hidden; margin-bottom: 12px; max-height: 200px; overflow-y: auto; }
     .printer-item {
       display: flex; align-items: center; gap: 12px;
       padding: 12px 14px; cursor: pointer; transition: background 0.1s;
@@ -119,8 +121,9 @@
     .printer-meta { font-size: 11px; color: #9ca3af; margin-top: 1px; }
     .printer-badge {
       font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 99px;
-      background: #dbeafe; color: #1d4ed8;
     }
+    .printer-badge.receipt { background: #dbeafe; color: #1d4ed8; }
+    .printer-badge.label { background: #fef3c7; color: #92400e; }
     .printer-check { color: #2563eb; font-size: 16px; }
 
     /* Paper size toggle */
@@ -135,14 +138,14 @@
     .paper-opt.selected small { color: #60a5fa; }
 
     /* Print mode toggle */
-    .mode-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+    .mode-toggle { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 16px; }
     .mode-opt {
       padding: 10px; border: 1.5px solid #e5e7eb; border-radius: 8px;
-      text-align: center; cursor: pointer; transition: all 0.15s; font-size: 13px; font-weight: 600;
+      text-align: center; cursor: pointer; transition: all 0.15s; font-size: 12px; font-weight: 600;
     }
     .mode-opt:hover { border-color: #93c5fd; background: #f0f9ff; }
     .mode-opt.selected { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; }
-    .mode-opt small { display: block; font-size: 11px; font-weight: 400; color: #9ca3af; margin-top: 2px; }
+    .mode-opt small { display: block; font-size: 10px; font-weight: 400; color: #9ca3af; margin-top: 2px; }
     .mode-opt.selected small { color: #60a5fa; }
 
     .section-label { font-size: 12px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
@@ -152,6 +155,21 @@
     /* Screens */
     .screen { display: none; }
     .screen.active { display: block; }
+
+    /* Printer type indicator */
+    .printer-type-header {
+      background: #f9fafb; padding: 10px 14px; border-radius: 10px;
+      margin-bottom: 12px; display: flex; align-items: center; gap: 10px;
+    }
+    .printer-type-icon {
+      width: 36px; height: 36px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+    }
+    .printer-type-icon.receipt-icon { background: #dbeafe; }
+    .printer-type-icon.label-icon { background: #fef3c7; }
+    .printer-type-title { font-size: 14px; font-weight: 700; color: #111827; }
+    .printer-type-desc { font-size: 11px; color: #6b7280; }
   </style>
 </head>
 <body>
@@ -167,10 +185,13 @@
         <div class="step-dot active" id="dot1">1</div>
         <div class="step-line" id="line1"></div>
         <div class="step-dot" id="dot2">2</div>
+        <div class="step-line" id="line2"></div>
+        <div class="step-dot" id="dot3">3</div>
       </div>
       <div style="display:flex;justify-content:space-between;padding:0 4px;">
         <div class="step-label">Negocio</div>
-        <div class="step-label">Impresora</div>
+        <div class="step-label">Recibos</div>
+        <div class="step-label">Etiquetas</div>
       </div>
     </div>
 
@@ -192,22 +213,28 @@
       </div>
     </div>
 
-    <!-- ── STEP 2: Printer Setup ── -->
+    <!-- ── STEP 2: Receipt Printer Setup ── -->
     <div class="screen" id="screen2">
-      <p class="subtitle">Configure su impresora de recibos para que funcione correctamente.</p>
+      <div class="printer-type-header">
+        <div class="printer-type-icon receipt-icon">🧾</div>
+        <div>
+          <div class="printer-type-title">Impresora de Recibos</div>
+          <div class="printer-type-desc">Para imprimir facturas y tickets de venta</div>
+        </div>
+      </div>
       <div class="error-msg" id="errorMsg2"></div>
       <div class="success-msg" id="successMsg2"></div>
 
-      <!-- Printer list -->
-      <div class="section-label">Seleccionar Impresora</div>
-      <div class="printer-list" id="printerList">
+      <!-- Receipt Printer list -->
+      <div class="section-label">Seleccionar Impresora de Recibos</div>
+      <div class="printer-list" id="receiptPrinterList">
         <div class="no-printers">
           <div class="spinner" style="margin:0 auto 8px;"></div>
           Buscando impresoras...
         </div>
       </div>
-      <button type="button" class="btn-secondary" id="refreshBtn" onclick="loadPrinters()" style="margin-bottom:16px;margin-top:-8px;">
-        ↻ Actualizar lista de impresoras
+      <button type="button" class="btn-secondary" onclick="loadPrinters()" style="margin-bottom:16px;margin-top:-4px;font-size:12px;padding:8px;">
+        ↻ Actualizar lista
       </button>
 
       <!-- Paper size -->
@@ -223,31 +250,73 @@
 
       <!-- Print mode -->
       <div class="section-label">Modo de Impresión</div>
-      <div class="mode-toggle" style="grid-template-columns: 1fr 1fr 1fr;">
+      <div class="mode-toggle">
         <div class="mode-opt selected" id="modeGDI" onclick="selectMode('gdi')">
-          Windows (GDI) <small>Más compatible</small>
+          Windows <small>Más compatible</small>
         </div>
         <div class="mode-opt" id="modeBitmap" onclick="selectMode('bitmap')">
-          Bitmap HD <small>Alta calidad</small>
+          Bitmap HD <small>Con logo</small>
         </div>
         <div class="mode-opt" id="modeRAW" onclick="selectMode('raw')">
-          Directo (ESC/POS) <small>Más rápido</small>
+          ESC/POS <small>Más rápido</small>
         </div>
       </div>
 
-      <!-- Actions -->
+      <!-- Test print -->
+      <button type="button" class="btn-secondary" id="testReceiptBtn" onclick="handleTestReceiptPrint()" style="margin-bottom:12px;">
+        🖨 Prueba de Recibo
+      </button>
+
       <div class="loading" id="loading2">
         <div class="spinner"></div>
-        <span id="loading2Text">Guardando configuración...</span>
+        <span id="loading2Text">Imprimiendo...</span>
       </div>
-      <button type="button" class="btn-secondary" id="testBtn" onclick="handleTestPrint()" style="margin-bottom:8px;">
-        🖨 Imprimir Página de Prueba
+
+      <button type="button" class="btn-primary" id="nextBtn2" onclick="goToStep3()">
+        Continuar → Impresora de Etiquetas
       </button>
+      <button type="button" onclick="skipToFinish()" style="background:none;border:none;color:#9ca3af;font-size:12px;cursor:pointer;margin-top:10px;width:100%;text-align:center;">
+        Omitir configuración de impresoras
+      </button>
+    </div>
+
+    <!-- ── STEP 3: Label Printer Setup ── -->
+    <div class="screen" id="screen3">
+      <div class="printer-type-header">
+        <div class="printer-type-icon label-icon">🏷️</div>
+        <div>
+          <div class="printer-type-title">Impresora de Etiquetas</div>
+          <div class="printer-type-desc">Para imprimir stickers de precios y códigos de barra</div>
+        </div>
+      </div>
+      <div class="error-msg" id="errorMsg3"></div>
+      <div class="success-msg" id="successMsg3"></div>
+
+      <!-- Label Printer list -->
+      <div class="section-label">Seleccionar Impresora de Etiquetas</div>
+      <div class="printer-list" id="labelPrinterList">
+        <div class="no-printers">Cargando...</div>
+      </div>
+
+      <p class="hint" style="margin-bottom:16px;">
+        Seleccione la impresora que tiene conectada para etiquetas/stickers (ej: iDSRT SP320, 4BARCODE, Godex, etc.)
+      </p>
+
+      <!-- Test label print -->
+      <button type="button" class="btn-secondary" id="testLabelBtn" onclick="handleTestLabelPrint()" style="margin-bottom:12px;">
+        🏷️ Prueba de Etiqueta
+      </button>
+
+      <div class="loading" id="loading3">
+        <div class="spinner"></div>
+        <span id="loading3Text">Imprimiendo...</span>
+      </div>
+
       <button type="button" class="btn-success" id="finishBtn" onclick="handleFinish()">
         ✓ Listo — Abrir Celeste POS
       </button>
-      <button type="button" onclick="skipPrinter()" style="background:none;border:none;color:#9ca3af;font-size:12px;cursor:pointer;margin-top:10px;width:100%;text-align:center;">
-        Configurar impresora más tarde
+      <button type="button" onclick="skipLabelPrinter()" style="background:none;border:none;color:#9ca3af;font-size:12px;cursor:pointer;margin-top:10px;width:100%;text-align:center;">
+        No tengo impresora de etiquetas
       </button>
     </div>
 
@@ -255,7 +324,8 @@
   </div>
 
   <script>
-    let selectedPrinter = null;
+    let selectedReceiptPrinter = null;
+    let selectedLabelPrinter = null;
     let selectedPaper = '80';
     let selectedMode = 'gdi';
     let printers = [];
@@ -274,7 +344,10 @@
     function setLoading(id, on, text) {
       const el = document.getElementById(id);
       el.classList.toggle('visible', on);
-      if (text) document.getElementById(id + 'Text') && (document.getElementById(id + 'Text').textContent = text);
+      if (text) {
+        const textEl = document.getElementById(id + 'Text');
+        if (textEl) textEl.textContent = text;
+      }
     }
 
     // ── Step navigation ────────────────────────────────────────────────────────
@@ -287,6 +360,19 @@
       document.getElementById('line1').classList.add('done');
       document.getElementById('dot2').classList.add('active');
       loadPrinters();
+    }
+
+    function goToStep3() {
+      // Save receipt printer config first
+      saveReceiptPrinterConfig();
+      document.getElementById('screen2').classList.remove('active');
+      document.getElementById('screen3').classList.add('active');
+      document.getElementById('dot2').classList.remove('active');
+      document.getElementById('dot2').classList.add('done');
+      document.getElementById('dot2').textContent = '✓';
+      document.getElementById('line2').classList.add('done');
+      document.getElementById('dot3').classList.add('active');
+      renderLabelPrinters();
     }
 
     // ── Step 1: Tenant Code ────────────────────────────────────────────────────
@@ -319,23 +405,23 @@
       return false;
     }
 
-    // ── Step 2: Printer Setup ──────────────────────────────────────────────────
+    // ── Step 2: Receipt Printer Setup ──────────────────────────────────────────
     async function loadPrinters() {
-      document.getElementById('printerList').innerHTML = '<div class="no-printers"><div class="spinner" style="margin:0 auto 8px;"></div>Buscando impresoras...</div>';
+      document.getElementById('receiptPrinterList').innerHTML = '<div class="no-printers"><div class="spinner" style="margin:0 auto 8px;"></div>Buscando impresoras...</div>';
       try {
         if (window.CelesteSetup && window.CelesteSetup.getAvailablePrinters) {
           printers = await window.CelesteSetup.getAvailablePrinters();
         } else {
           printers = [];
         }
-        renderPrinters();
+        renderReceiptPrinters();
       } catch (err) {
-        document.getElementById('printerList').innerHTML = '<div class="no-printers">No se pudo obtener la lista de impresoras.</div>';
+        document.getElementById('receiptPrinterList').innerHTML = '<div class="no-printers">No se pudo obtener la lista de impresoras.</div>';
       }
     }
 
-    function renderPrinters() {
-      const list = document.getElementById('printerList');
+    function renderReceiptPrinters() {
+      const list = document.getElementById('receiptPrinterList');
       if (!printers || printers.length === 0) {
         list.innerHTML = '<div class="no-printers">No se encontraron impresoras instaladas.<br><small>Conecte la impresora y haga clic en "Actualizar".</small></div>';
         return;
@@ -348,28 +434,85 @@
         if (!a.isDefault && b.isDefault) return 1;
         return 0;
       });
-      // Auto-select first receipt printer or default
-      if (!selectedPrinter) {
+      // Auto-select first receipt/thermal printer
+      if (!selectedReceiptPrinter) {
         const autoSelect = sorted.find(p => p.isReceipt) || sorted.find(p => p.isDefault) || sorted[0];
-        if (autoSelect) selectedPrinter = autoSelect.name;
+        if (autoSelect) selectedReceiptPrinter = autoSelect.name;
       }
-      list.innerHTML = sorted.map(p => `
-        <div class="printer-item ${selectedPrinter === p.name ? 'selected' : ''}" onclick="selectPrinter('${p.name.replace(/'/g, "\\'")}')">
+      list.innerHTML = sorted.map(p => {
+        const isLabel = isLabelPrinter(p);
+        return `
+        <div class="printer-item ${selectedReceiptPrinter === p.name ? 'selected' : ''}" onclick="selectReceiptPrinter('${p.name.replace(/'/g, "\\'")}')">
           <div class="printer-dot ${p.status === 'ready' ? 'ready' : 'offline'}"></div>
           <div class="printer-info">
             <div class="printer-name">${p.displayName || p.name}</div>
-            <div class="printer-meta">${p.status === 'ready' ? 'Listo' : 'Sin conexión'}${p.isDefault ? ' · Predeterminada' : ''}</div>
+            <div class="printer-meta">${p.status === 'ready' ? 'Listo' : 'Sin conexión'}${p.isDefault ? ' · Predeterminada' : ''}${isLabel ? ' · Probable etiquetas' : ''}</div>
           </div>
-          ${p.isReceipt ? '<span class="printer-badge">Recibo</span>' : ''}
-          ${selectedPrinter === p.name ? '<span class="printer-check">✓</span>' : ''}
-        </div>
-      `).join('');
+          ${p.isReceipt ? '<span class="printer-badge receipt">Recibo</span>' : ''}
+          ${isLabel ? '<span class="printer-badge label">Etiqueta</span>' : ''}
+          ${selectedReceiptPrinter === p.name ? '<span class="printer-check">✓</span>' : ''}
+        </div>`;
+      }).join('');
     }
 
-    function selectPrinter(name) {
-      selectedPrinter = name;
-      renderPrinters();
+    function renderLabelPrinters() {
+      const list = document.getElementById('labelPrinterList');
+      if (!printers || printers.length === 0) {
+        list.innerHTML = '<div class="no-printers">No se encontraron impresoras.<br><small>Conecte la impresora de etiquetas.</small></div>';
+        return;
+      }
+      // Sort: label printers first, then non-receipt printers
+      const sorted = [...printers].sort((a, b) => {
+        const aLabel = isLabelPrinter(a);
+        const bLabel = isLabelPrinter(b);
+        if (aLabel && !bLabel) return -1;
+        if (!aLabel && bLabel) return 1;
+        // Deprioritize the receipt printer already selected
+        if (a.name === selectedReceiptPrinter && b.name !== selectedReceiptPrinter) return 1;
+        if (a.name !== selectedReceiptPrinter && b.name === selectedReceiptPrinter) return -1;
+        return 0;
+      });
+      // Auto-select label printer (prefer label-type, exclude receipt printer)
+      if (!selectedLabelPrinter) {
+        const autoSelect = sorted.find(p => isLabelPrinter(p) && p.name !== selectedReceiptPrinter) 
+          || sorted.find(p => p.name !== selectedReceiptPrinter) 
+          || sorted[0];
+        if (autoSelect) selectedLabelPrinter = autoSelect.name;
+      }
+      list.innerHTML = sorted.map(p => {
+        const isLabel = isLabelPrinter(p);
+        const isReceipt = p.name === selectedReceiptPrinter;
+        return `
+        <div class="printer-item ${selectedLabelPrinter === p.name ? 'selected' : ''}" onclick="selectLabelPrinter('${p.name.replace(/'/g, "\\'")}')">
+          <div class="printer-dot ${p.status === 'ready' ? 'ready' : 'offline'}"></div>
+          <div class="printer-info">
+            <div class="printer-name">${p.displayName || p.name}</div>
+            <div class="printer-meta">${p.status === 'ready' ? 'Listo' : 'Sin conexión'}${isReceipt ? ' · Ya asignada a Recibos' : ''}${isLabel ? ' · Probable etiquetas' : ''}</div>
+          </div>
+          ${isLabel ? '<span class="printer-badge label">Etiqueta</span>' : ''}
+          ${isReceipt ? '<span class="printer-badge receipt">Recibo</span>' : ''}
+          ${selectedLabelPrinter === p.name ? '<span class="printer-check">✓</span>' : ''}
+        </div>`;
+      }).join('');
+    }
+
+    // Heuristic to identify label/sticker printers
+    function isLabelPrinter(p) {
+      const name = (p.name || '').toLowerCase();
+      const patterns = ['label', 'etiqueta', 'sticker', '4barcode', '4b-', 'godex', 'idsrt', 'sp320', 'tsc', 'zebra', 'dymo', 'brother ql', 'ql-'];
+      return patterns.some(pat => name.includes(pat));
+    }
+
+    function selectReceiptPrinter(name) {
+      selectedReceiptPrinter = name;
+      renderReceiptPrinters();
       hideError('errorMsg2');
+    }
+
+    function selectLabelPrinter(name) {
+      selectedLabelPrinter = name;
+      renderLabelPrinters();
+      hideError('errorMsg3');
     }
 
     function selectPaper(size) {
@@ -385,52 +528,99 @@
       document.getElementById('modeRAW').classList.toggle('selected', mode === 'raw');
     }
 
-    async function handleTestPrint() {
-      if (!selectedPrinter) { showError('errorMsg2', 'Seleccione una impresora primero.'); return; }
+    // ── Test Prints ────────────────────────────────────────────────────────────
+    async function handleTestReceiptPrint() {
+      if (!selectedReceiptPrinter) { showError('errorMsg2', 'Seleccione una impresora primero.'); return; }
       hideError('errorMsg2');
-      document.getElementById('testBtn').disabled = true;
-      document.getElementById('testBtn').textContent = '🖨 Imprimiendo...';
+      document.getElementById('testReceiptBtn').disabled = true;
+      setLoading('loading2', true, 'Imprimiendo prueba...');
       try {
         if (window.CelesteSetup && window.CelesteSetup.testPrint) {
-          const result = await window.CelesteSetup.testPrint(selectedPrinter, selectedPaper, selectedMode);
+          const result = await window.CelesteSetup.testPrint(selectedReceiptPrinter, selectedPaper, selectedMode);
           if (result && result.success) {
-            showSuccess('successMsg2', '✓ Página de prueba enviada. Si no salió, verifique el papel y la conexión.');
+            showSuccess('successMsg2', '✓ Prueba enviada. Verifique que salió correctamente.');
           } else {
-            showError('errorMsg2', 'Error al imprimir: ' + (result && result.error ? result.error : 'Desconocido'));
+            showError('errorMsg2', 'Error: ' + (result && result.error ? result.error : 'Desconocido'));
           }
-        } else {
-          showError('errorMsg2', 'Función de prueba no disponible en esta versión.');
         }
       } catch (err) {
         showError('errorMsg2', 'Error: ' + err.message);
       }
-      document.getElementById('testBtn').disabled = false;
-      document.getElementById('testBtn').textContent = '🖨 Imprimir Página de Prueba';
+      document.getElementById('testReceiptBtn').disabled = false;
+      setLoading('loading2', false);
+    }
+
+    async function handleTestLabelPrint() {
+      if (!selectedLabelPrinter) { showError('errorMsg3', 'Seleccione una impresora primero.'); return; }
+      hideError('errorMsg3');
+      document.getElementById('testLabelBtn').disabled = true;
+      setLoading('loading3', true, 'Imprimiendo etiqueta de prueba...');
+      try {
+        if (window.CelesteSetup && window.CelesteSetup.testLabelPrint) {
+          const result = await window.CelesteSetup.testLabelPrint(selectedLabelPrinter);
+          if (result && result.success) {
+            showSuccess('successMsg3', '✓ Etiqueta de prueba enviada. Verifique que salió correctamente.');
+          } else {
+            showError('errorMsg3', 'Error: ' + (result && result.error ? result.error : 'Desconocido'));
+          }
+        } else {
+          showError('errorMsg3', 'Función de prueba de etiquetas no disponible.');
+        }
+      } catch (err) {
+        showError('errorMsg3', 'Error: ' + err.message);
+      }
+      document.getElementById('testLabelBtn').disabled = false;
+      setLoading('loading3', false);
+    }
+
+    // ── Save & Finish ──────────────────────────────────────────────────────────
+    function saveReceiptPrinterConfig() {
+      if (window.CelesteSetup && window.CelesteSetup.savePrinterSetup) {
+        window.CelesteSetup.savePrinterSetup({
+          printerName: selectedReceiptPrinter || '',
+          paperSize: selectedPaper,
+          printMode: selectedMode,
+        });
+      }
     }
 
     async function handleFinish() {
-      hideError('errorMsg2');
-      setLoading('loading2', true, 'Guardando configuración...');
+      hideError('errorMsg3');
+      setLoading('loading3', true, 'Guardando configuración...');
       document.getElementById('finishBtn').disabled = true;
       try {
+        // Save receipt printer config
         if (window.CelesteSetup && window.CelesteSetup.savePrinterSetup) {
           await window.CelesteSetup.savePrinterSetup({
-            printerName: selectedPrinter || '',
+            printerName: selectedReceiptPrinter || '',
             paperSize: selectedPaper,
             printMode: selectedMode,
           });
         }
+        // Save label printer config
+        if (window.CelesteSetup && window.CelesteSetup.saveLabelPrinter) {
+          await window.CelesteSetup.saveLabelPrinter(selectedLabelPrinter || '');
+        }
+        // Finish setup
         if (window.CelesteSetup && window.CelesteSetup.finishSetup) {
           await window.CelesteSetup.finishSetup();
         }
       } catch (err) {
-        setLoading('loading2', false);
+        setLoading('loading3', false);
         document.getElementById('finishBtn').disabled = false;
-        showError('errorMsg2', 'Error al guardar: ' + err.message);
+        showError('errorMsg3', 'Error al guardar: ' + err.message);
       }
     }
 
-    function skipPrinter() {
+    function skipLabelPrinter() {
+      // Save receipt config and finish without label printer
+      saveReceiptPrinterConfig();
+      if (window.CelesteSetup && window.CelesteSetup.finishSetup) {
+        window.CelesteSetup.finishSetup();
+      }
+    }
+
+    function skipToFinish() {
       if (window.CelesteSetup && window.CelesteSetup.finishSetup) {
         window.CelesteSetup.finishSetup();
       }

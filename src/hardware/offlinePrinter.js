@@ -275,6 +275,7 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
 }
 
 // ─── Build Receipt Text (plain text, like Eleventa) ─────────────────────────
+// Produces a professional, well-formatted text receipt with proper columns
 function buildReceiptText(data, maxCols = 42) {
   const lines = [];
   const center = (text) => {
@@ -287,20 +288,26 @@ function buildReceiptText(data, maxCols = 42) {
     const l = left.substring(0, maxLeft).padEnd(maxLeft);
     return l + ' ' + right;
   };
+  const rightAlign = (text) => {
+    return text.padStart(maxCols);
+  };
   const divider = () => '='.repeat(maxCols);
   const dashes = () => '-'.repeat(maxCols);
 
   // Header
   lines.push(divider());
-  lines.push(center(data.storeName || 'SUPERMERCADO'));
+  lines.push(center((data.storeName || 'SUPERMERCADO').toUpperCase()));
   if (data.storeAddress) lines.push(center(data.storeAddress));
   if (data.storePhone) lines.push(center(`Tel: ${data.storePhone}`));
   if (data.storeRnc) lines.push(center(`RNC: ${data.storeRnc}`));
-  if (data.storeWhatsapp) lines.push(center(`WhatsApp: ${data.storeWhatsapp}`));
   lines.push(divider());
 
   // NCF / Comprobante Fiscal
-  if (data.ncfNumber) {
+  if (data.ecf) {
+    lines.push(center(data.ecf.documentType || 'FACTURA ELECTRONICA'));
+    lines.push(center(`e-NCF: ${data.ecf.eNcf}`));
+    lines.push(dashes());
+  } else if (data.ncfNumber) {
     lines.push(center('COMPROBANTE FISCAL'));
     lines.push(leftRight('NCF:', data.ncfNumber));
     lines.push(dashes());
@@ -308,45 +315,71 @@ function buildReceiptText(data, maxCols = 42) {
 
   // Ticket info
   const ticketNum = data.ticketNumber || data.receiptNumber || '';
-  lines.push(center(`RECIBO #${ticketNum}`));
+  lines.push('');
+  lines.push(center(`*** RECIBO #${ticketNum} ***`));
+  if (data.isReprint) lines.push(center('*** REIMPRESION ***'));
+  lines.push('');
   if (data.date) lines.push(leftRight('Fecha:', data.date));
   if (data.cashierName || data.cashier) lines.push(leftRight('Cajero:', data.cashierName || data.cashier));
   if (data.customerName) lines.push(leftRight('Cliente:', data.customerName));
   if (data.customerRnc) lines.push(leftRight('RNC/Cedula:', data.customerRnc));
   lines.push(dashes());
 
-  // Column headers
-  lines.push(leftRight('Cant. Descripcion', 'Importe'));
+  // Column headers for items
+  // Format: Cant  Descripcion          Precio   Total
+  const colCant = 5;   // "99x  " or "1.234kg"
+  const colTotal = 10; // "$99,999.99"
+  const colPrice = 10; // "$99,999.99"
+  const colDesc = maxCols - colCant - colTotal - colPrice - 2; // remaining space
+
+  // Header row
+  const hdrCant = 'Cant'.padEnd(colCant);
+  const hdrDesc = 'Descripcion'.padEnd(colDesc);
+  const hdrPrice = 'Precio'.padStart(colPrice);
+  const hdrTotal = 'Total'.padStart(colTotal);
+  lines.push(`${hdrCant} ${hdrDesc}${hdrPrice}${hdrTotal}`);
   lines.push(dashes());
 
-  // Items
+  // Items with proper columns
   for (const item of (data.items || [])) {
     const rawQty = item.quantity || item.qty || 1;
     const rawPrice = item.unitPrice || item.price || 0;
-    const qty = item.isWeighed ? `${parseFloat(String(rawQty)).toFixed(3)}kg` : `${rawQty}`;
-    const total = parseFloat(String(item.total || (rawQty * rawPrice))).toFixed(2);
-    const name = (item.name || '').substring(0, maxCols - 15);
-    lines.push(leftRight(`${qty}  ${name}`, `$${total}`));
+    const qty = item.isWeighed ? `${parseFloat(String(rawQty)).toFixed(2)}k` : `${rawQty}x`;
+    const unitPrice = parseFloat(String(rawPrice)).toFixed(2);
+    const lineTotal = parseFloat(String(item.total || (rawQty * rawPrice))).toFixed(2);
+    const name = (item.name || '').substring(0, colDesc - 1);
+
+    const fmtQty = qty.padEnd(colCant);
+    const fmtName = name.padEnd(colDesc);
+    const fmtPrice = unitPrice.padStart(colPrice);
+    const fmtTotal = lineTotal.padStart(colTotal);
+    lines.push(`${fmtQty} ${fmtName}${fmtPrice}${fmtTotal}`);
   }
   lines.push(dashes());
 
-  // Totals
-  const itemCount = (data.items || []).length;
-  lines.push(center(`No. de Articulos: ${itemCount}`));
+  // Item count
+  const itemCount = (data.items || []).reduce((sum, item) => {
+    const qty = item.quantity || item.qty || 1;
+    return sum + (typeof qty === 'number' ? qty : parseFloat(String(qty)) || 1);
+  }, 0);
+  const uniqueItems = (data.items || []).length;
+  lines.push(center(`${uniqueItems} articulo(s) | ${itemCount} unidad(es)`));
   lines.push('');
 
+  // Totals
   const subtotal = parseFloat(data.subtotal || 0).toFixed(2);
   const tax = parseFloat(data.taxAmount || data.tax || 0).toFixed(2);
   const total = parseFloat(data.total || 0).toFixed(2);
 
   lines.push(leftRight('Subtotal:', `$${subtotal}`));
   if (data.taxBreakdown) {
-    if (data.taxBreakdown.itbis18 > 0) lines.push(leftRight('  ITBIS 18%:', `$${data.taxBreakdown.itbis18.toFixed(2)}`));
+    if (data.taxBreakdown.exempt > 0) lines.push(leftRight('  Exento:', `$${data.taxBreakdown.exempt.toFixed(2)}`));
     if (data.taxBreakdown.itbis16 > 0) lines.push(leftRight('  ITBIS 16%:', `$${data.taxBreakdown.itbis16.toFixed(2)}`));
+    if (data.taxBreakdown.itbis18 > 0) lines.push(leftRight('  ITBIS 18%:', `$${data.taxBreakdown.itbis18.toFixed(2)}`));
   }
-  if (parseFloat(tax) > 0) lines.push(leftRight('ITBIS:', `$${tax}`));
+  if (parseFloat(tax) > 0) lines.push(leftRight('Total ITBIS:', `$${tax}`));
   lines.push(divider());
-  lines.push(leftRight('TOTAL:', `$${total}`));
+  lines.push(leftRight('*** TOTAL:', `$${total} ***`));
   lines.push(divider());
 
   // Payments
@@ -363,9 +396,31 @@ function buildReceiptText(data, maxCols = 42) {
   }
   lines.push(dashes());
 
+  // e-NCF verification info
+  if (data.ecf) {
+    lines.push('');
+    lines.push(center('VERIFICACION FISCAL DGII'));
+    lines.push(leftRight('e-NCF:', data.ecf.eNcf));
+    if (data.ecf.securityCode) lines.push(leftRight('Cod. Seguridad:', data.ecf.securityCode));
+    if (data.ecf.signatureDate) lines.push(leftRight('Firma Digital:', data.ecf.signatureDate));
+    lines.push(dashes());
+  }
+
+  // Social media / contact info
+  if (data.socialMedia) {
+    lines.push('');
+    lines.push(center('--- Contacto ---'));
+    if (data.socialMedia.whatsapp) lines.push(center(`WhatsApp: ${data.socialMedia.whatsapp}`));
+    if (data.socialMedia.instagram) lines.push(center(`IG: ${data.socialMedia.instagram}`));
+    if (data.socialMedia.facebook) lines.push(center(`FB: ${data.socialMedia.facebook}`));
+    if (data.socialMedia.website) lines.push(center(`Web: ${data.socialMedia.website}`));
+    lines.push('');
+  }
+
   // Footer
+  lines.push('');
   if (data.footerMessage) lines.push(center(data.footerMessage));
-  lines.push(center('Gracias por su compra'));
+  lines.push(center('Gracias por su compra!'));
   lines.push(center('Conserve este recibo para'));
   lines.push(center('cualquier reclamacion.'));
   lines.push('');
