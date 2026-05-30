@@ -184,8 +184,15 @@ async function downloadWebappUpdate(store, onProgress) {
     const targetDir = getUpdatableWebappDir();
     const assetsDir = path.join(targetDir, 'assets');
     
-    // Ensure assets directory exists
-    if (!fs.existsSync(assetsDir)) {
+    // CRITICAL: Clean old assets before downloading new version
+    // Stale files from previous versions cause "Failed to fetch dynamically imported module" errors
+    if (fs.existsSync(assetsDir)) {
+      console.log('[WebappUpdater] Cleaning old assets directory...');
+      const oldFiles = fs.readdirSync(assetsDir);
+      for (const file of oldFiles) {
+        try { fs.unlinkSync(path.join(assetsDir, file)); } catch { /* ignore */ }
+      }
+    } else {
       fs.mkdirSync(assetsDir, { recursive: true });
     }
     

@@ -299,6 +299,61 @@ function startLocalServer(externalWebappDir) {
         return;
       }
 
+      // FALLBACK: If an /assets/ file is missing locally, fetch it from the cloud
+      // This handles cases where lazy-loaded chunks weren't bundled or cached yet
+      if (urlPath.startsWith('/assets/') && urlPath.match(/\.(js|css|woff2?|ttf|png|jpg|svg)$/)) {
+        console.log(`[LocalServer] Asset missing locally, fetching from cloud: ${urlPath}`);
+        const cloudUrl = `${CLOUD_URL}${urlPath}`;
+        https.get(cloudUrl, { timeout: 15000 }, (cloudRes) => {
+          if (cloudRes.statusCode === 200) {
+            const ext = path.extname(urlPath).toLowerCase();
+            const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
+            res.writeHead(200, {
+              'Content-Type': mimeType,
+              'Cache-Control': 'public, max-age=31536000, immutable',
+            });
+            // Also save to local cache for future requests
+            const chunks = [];
+            cloudRes.on('data', (chunk) => {
+              chunks.push(chunk);
+              res.write(chunk);
+            });
+            cloudRes.on('end', () => {
+              res.end();
+              // Save to local disk for offline use
+              try {
+                const dir = path.dirname(filePath);
+                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                fs.writeFileSync(filePath, Buffer.concat(chunks));
+                console.log(`[LocalServer] Cached cloud asset locally: ${urlPath}`);
+              } catch (e) {
+                console.warn(`[LocalServer] Could not cache asset: ${e.message}`);
+              }
+            });
+          } else {
+            // Cloud doesn't have it either — serve index.html for SPA routing
+            const indexPath = path.join(webappDir, 'index.html');
+            if (fs.existsSync(indexPath)) {
+              serveStaticFile(indexPath, res);
+            } else {
+              res.writeHead(404, { 'Content-Type': 'text/plain' });
+              res.end('Not Found');
+            }
+          }
+        }).on('error', (err) => {
+          console.error(`[LocalServer] Cloud fetch failed for ${urlPath}:`, err.message);
+          // Serve index.html as last resort (SPA routing)
+          const indexPath = path.join(webappDir, 'index.html');
+          if (fs.existsSync(indexPath)) {
+            serveStaticFile(indexPath, res);
+          } else {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not Found');
+          }
+        });
+        return;
+      }
+
       // For SPA routing: serve index.html for all non-file routes
       const indexPath = path.join(webappDir, 'index.html');
       if (fs.existsSync(indexPath)) {
