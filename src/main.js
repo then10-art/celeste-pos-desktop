@@ -238,7 +238,30 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
 // ─── IPC: Printer Setup (Step 2 of setup wizard) ────────────────────────────
 ipcMain.handle('setup-get-printers', async () => {
   try {
-    return await getAvailablePrinters();
+    // During setup, mainWindow doesn't exist yet, so we use setupWindow's webContents directly
+    const win = setupWindow || mainWindow;
+    if (!win) {
+      console.log('[Setup] No window available for printer detection');
+      return [];
+    }
+    const printers = win.webContents.getPrinters();
+    const EXCLUDED_PATTERNS = [/fax/i, /onenote/i, /xps/i, /pdf/i, /virtual/i, /remote/i];
+    const RECEIPT_PRINTER_PATTERNS = [/pos-?\d/i, /tm-?[tul]/i, /rp-?\d/i, /sp-?\d/i, /ct-?[se]/i, /srp-?\d/i, /btp-?/i, /star\s/i, /citizen/i, /bixolon/i, /sewoo/i, /rongta/i, /munbyn/i, /hoin/i, /xprinter/i];
+    const result = [];
+    for (const p of printers) {
+      const isExcluded = EXCLUDED_PATTERNS.some(rx => rx.test(p.name));
+      const isReceipt = RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name));
+      result.push({
+        name: p.name,
+        displayName: p.displayName || p.name,
+        status: p.status === 0 ? 'ready' : 'offline',
+        isDefault: p.isDefault,
+        isReceipt: !isExcluded && isReceipt,
+        type: 'system',
+      });
+    }
+    console.log(`[Setup] Found ${result.length} printers`);
+    return result;
   } catch (err) {
     console.error('[Setup] getAvailablePrinters error:', err.message);
     return [];
