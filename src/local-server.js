@@ -240,10 +240,11 @@ function serveStaticFile(filePath, res) {
 /**
  * Create and start the local HTTP server
  * Returns a promise that resolves with the port number
+ * @param {string|null} externalWebappDir - Optional webapp directory override (from webapp-updater)
  */
-function startLocalServer() {
+function startLocalServer(externalWebappDir) {
   return new Promise((resolve, reject) => {
-    const webappDir = getWebappDir();
+    const webappDir = externalWebappDir || getWebappDir();
 
     if (!webappDir) {
       console.warn('[LocalServer] No webapp directory found — will use cloud URL directly');

@@ -1,6 +1,6 @@
 {
   "name": "celeste-pos-desktop",
-  "version": "2.5.3",
+  "version": "2.6.0",
   "description": "Celeste POS - Desktop Application for Windows",
   "main": "src/main.js",
   "author": "Celeste POS",

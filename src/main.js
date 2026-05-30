@@ -74,6 +74,7 @@ const { printReceiptGDI, printLabelGDI, printLabelsGDI } = require('./hardware/o
 const { printReceiptBitmap } = require('./hardware/bitmapPrinter');
 const { generateReceiptHTMLForBitmap } = require('./hardware/receiptHtmlGenerator');
 const { startLocalServer } = require('./local-server');
+const { getActiveWebappDir, runBackgroundWebappUpdate } = require('./webapp-updater');
 
 // ─── Local Server State ──────────────────────────────────────────────────────
 let localServerPort = null;
@@ -348,13 +349,15 @@ ipcMain.handle('setup-finish', async () => {
 
 // ─── Main App Launch ─────────────────────────────────────────────────────────
 async function launchMainApp() {
-  // Start local server for bundled frontend
+  // Start local server with the best available webapp directory
+  // Prefers: cached update > bundled webapp > cloud URL fallback
   try {
-    const result = await startLocalServer();
+    const webappDir = getActiveWebappDir();
+    const result = await startLocalServer(webappDir);
     if (result) {
       localServerPort = result.port;
       localServerInstance = result.server;
-      console.log(`[App] Local server started on port ${localServerPort}`);
+      console.log(`[App] Local server started on port ${localServerPort} (serving: ${webappDir})`);
     } else {
       console.log('[App] No local webapp found — using cloud URL');
     }
@@ -364,6 +367,14 @@ async function launchMainApp() {
 
   // Create main window
   createWindow();
+
+  // Background: check for webapp UI updates (non-blocking)
+  // This downloads new UI files that will be used on next restart
+  setTimeout(() => {
+    runBackgroundWebappUpdate(store, mainWindow).catch(err => {
+      console.log('[App] Background webapp update check failed:', err.message);
+    });
+  }, 10000); // Wait 10s after startup to avoid competing with initial load
 
   // Setup hardware with mainWindow reference for system printer access
   await setupHardware(store.get('printerConfig'), mainWindow);
@@ -644,6 +655,41 @@ function buildAppMenu() {
               console.log('[App] Cache clear failed:', e.message);
             }
             mainWindow.webContents.reloadIgnoringCache();
+          }
+        },
+        {
+          label: 'Actualizar Interfaz',
+          accelerator: 'CmdOrCtrl+Shift+U',
+          click: async () => {
+            try {
+              const { downloadWebappUpdate } = require('./webapp-updater');
+              const { dialog } = require('electron');
+              mainWindow.webContents.executeJavaScript(`
+                document.title = 'Actualizando interfaz...';
+              `).catch(() => {});
+              const success = await downloadWebappUpdate(store, (msg) => {
+                console.log(`[Menu] ${msg}`);
+              });
+              if (success) {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'info',
+                  title: 'Interfaz Actualizada',
+                  message: 'La interfaz se ha actualizado correctamente. La aplicación se recargará ahora.',
+                  buttons: ['Aceptar']
+                }).then(() => {
+                  mainWindow.webContents.reloadIgnoringCache();
+                });
+              } else {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'warning',
+                  title: 'Error',
+                  message: 'No se pudo actualizar la interfaz. Verifique su conexión a internet.',
+                  buttons: ['Aceptar']
+                });
+              }
+            } catch (e) {
+              console.error('[Menu] Force update failed:', e.message);
+            }
           }
         },
         {

@@ -20,6 +20,45 @@ jobs:
         with:
           node-version: "18"
 
+      - name: Fetch latest webapp build from celestepos.live
+        shell: bash
+        run: |
+          echo "=== Fetching latest webapp from celestepos.live ==="
+          
+          # Remove old webapp files (keep directory structure)
+          rm -rf webapp/assets/*
+          
+          # Download index.html
+          curl -sL "https://celestepos.live/index.html" -o webapp/index.html
+          echo "Downloaded index.html"
+          
+          # Download manifest.json
+          curl -sL "https://celestepos.live/manifest.json" -o webapp/manifest.json 2>/dev/null || true
+          echo "Downloaded manifest.json"
+          
+          # Extract all asset references from index.html
+          ASSETS=$(grep -oP '(?:src|href)="/assets/[^"]+' webapp/index.html | sed 's/.*"//g' | sort -u)
+          
+          # Download each asset
+          mkdir -p webapp/assets
+          for asset in $ASSETS; do
+            echo "Downloading $asset..."
+            curl -sL "https://celestepos.live${asset}" -o "webapp${asset}"
+          done
+          
+          # Disable service worker in the downloaded index.html
+          sed -i "s/if ('serviceWorker' in navigator)/if (false \&\& 'serviceWorker' in navigator)/g" webapp/index.html
+          
+          # Remove debug collector and analytics scripts
+          sed -i '/__manus__\/debug-collector/d' webapp/index.html
+          sed -i '/manus-analytics/d' webapp/index.html
+          sed -i '/data-website-id/d' webapp/index.html
+          
+          echo "=== Webapp fetch complete ==="
+          echo "Files in webapp/assets/:"
+          ls webapp/assets/ | wc -l
+          echo "asset files downloaded"
+
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
