@@ -1561,24 +1561,46 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
 
   // Convert mm to microns (1mm = 1000 microns)
   // Default to 37.3x28.6mm to match 4BARCODE 4B-2074B sticker size
-  const wMicrons = Math.round((widthMm || 37.3) * 1000);
-  const hMicrons = Math.round((heightMm || 28.6) * 1000);
+  const w = widthMm || 37.3;
+  const h = heightMm || 28.6;
+  const wMicrons = Math.round(w * 1000);
+  const hMicrons = Math.round(h * 1000);
 
-  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${widthMm || 37.3}x${heightMm || 28.6}mm)`);
+  // Calculate pixel dimensions at 96 DPI to match label size exactly
+  // This prevents Chromium from creating a phantom second page
+  const pxWidth = Math.max(200, Math.round(w * 96 / 25.4));
+  const pxHeight = Math.round(h * 96 / 25.4);
+
+  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${w}x${h}mm), Window: ${pxWidth}x${pxHeight}px`);
+  console.log(`[Label Print] HTML length: ${html.length} chars`);
 
   return new Promise((resolve, reject) => {
     const { BrowserWindow: BW } = require('electron');
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+
+    // Write HTML to temp file instead of data: URL
+    // data: URLs have size limits and truncate base64 barcode/QR images
+    const tmpFile = path.join(os.tmpdir(), `celeste-label-${Date.now()}.html`);
+    fs.writeFileSync(tmpFile, html, 'utf-8');
+
     const printWin = new BW({
       show: false,
-      width: 800,
-      height: 600,
+      // Match window size to label pixel dimensions to prevent blank second page
+      width: pxWidth,
+      height: pxHeight,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
-    printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    // Set content size to exact label dimensions
+    printWin.setContentSize(pxWidth, pxHeight);
+
+    // Load from file — no size limits for base64 images
+    printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Wait a moment for images/barcodes to render
+      // Wait for images/barcodes/QR codes to fully render
       setTimeout(() => {
         printWin.webContents.print(
           {
@@ -1587,10 +1609,11 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             deviceName: printerName,
             margins: { marginType: 'none' },
             pageSize: { width: wMicrons, height: hMicrons },
-            // Don't set scaleFactor — let the system auto-scale to fit the label
+            copies: 1,
           },
           (success, failureReason) => {
             printWin.close();
+            try { fs.unlinkSync(tmpFile); } catch {}
             if (success) {
               console.log('[Label Print] Success');
               resolve({ success: true });
@@ -1600,17 +1623,19 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             }
           }
         );
-      }, 1200); // Wait longer for images/barcodes to render
+      }, 2000); // Wait 2s for base64 images to fully render
     });
 
     printWin.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
       console.error('[Label Print] Failed to load HTML:', errorDesc);
       try { printWin.close(); } catch { /* ignore */ }
+      try { fs.unlinkSync(tmpFile); } catch {}
       reject(new Error(`Failed to load label HTML: ${errorDesc}`));
     });
 
     setTimeout(() => {
       try { printWin.close(); } catch { /* ignore */ }
+      try { fs.unlinkSync(tmpFile); } catch {}
       reject(new Error('Label print timeout'));
     }, 15000);
   });
