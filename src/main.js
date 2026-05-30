@@ -515,6 +515,15 @@ function createWindow() {
   mainWindow.webContents.on('dom-ready', () => {
     console.log('[App] DOM ready — injecting desktop bridge early');
     injectDesktopBridge();
+    // Unregister any service workers that might serve stale cached content
+    mainWindow.webContents.executeJavaScript(`
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(registrations => {
+          registrations.forEach(r => r.unregister());
+          if (registrations.length > 0) console.log('[Desktop] Unregistered', registrations.length, 'service worker(s)');
+        });
+      }
+    `).catch(() => {});
   });
 
   // Also inject on did-finish-load as a safety net
