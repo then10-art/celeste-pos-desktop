@@ -34,6 +34,14 @@ try {
   console.log('[Updater] electron-updater not available:', e.message);
 }
 
+// ─── High-DPI & Rendering Quality ────────────────────────────────────────────
+// Enable crisp text rendering on high-DPI displays and standard monitors
+app.commandLine.appendSwitch('enable-features', 'CanvasOopRasterization');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('force-color-profile', 'srgb');
+// Ensure proper font rendering
+app.commandLine.appendSwitch('disable-lcd-text', 'false');
+
 // ─── App Configuration ───────────────────────────────────────────────────────
 const isDev = process.argv.includes('--dev');
 const CLOUD_URL = 'https://celestepos.live';
@@ -71,7 +79,7 @@ const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getR
 const { syncWithCloud, checkCloudHealth } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName } = require('./hardware');
 const { printReceiptGDI, printLabelGDI, printLabelsGDI } = require('./hardware/offlinePrinter');
-const { printReceiptBitmap } = require('./hardware/bitmapPrinter');
+const { printReceiptBitmap, printLabelBitmap } = require('./hardware/bitmapPrinter');
 const { generateReceiptHTMLForBitmap } = require('./hardware/receiptHtmlGenerator');
 const { startLocalServer } = require('./local-server');
 const { getActiveWebappDir, runBackgroundWebappUpdate } = require('./webapp-updater');
@@ -352,7 +360,7 @@ ipcMain.handle('setup-test-label-print', async (event, { printerName }) => {
       storeName: store.get('tenantName') || 'CELESTE POS',
       date: new Date().toLocaleDateString('es-DO'),
     };
-    const result = await printLabelGDI(labelData, printerName, 37.3, 28.6);
+    const result = await printLabelGDI(labelData, printerName, 51, 25);
     return result;
   } catch (err) {
     console.error('[Setup] testLabelPrint error:', err.message);
@@ -1378,6 +1386,17 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
     if (!labelPrinter) {
       return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
     }
+    const labelPrintMode = store.get('labelPrintMode') || 'bitmap';
+    if (labelPrintMode === 'bitmap') {
+      try {
+        console.log('[IPC] Label printing via BITMAP mode');
+        const result = await printLabelBitmap(receiptData.html, labelPrinter, receiptData.widthMm, receiptData.heightMm, sendRawToPrinter);
+        return result;
+      } catch (err) {
+        console.warn('[IPC] Bitmap label failed:', err.message, '- falling back to GDI');
+        // Fall through to GDI
+      }
+    }
     return await printLabelHTML(receiptData.html, labelPrinter, receiptData.widthMm, receiptData.heightMm);
   }
 
@@ -1486,6 +1505,16 @@ ipcMain.handle('print-label', async (event, { html, printerName, widthMm, height
   if (!name) {
     return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
   }
+  const labelPrintMode = store.get('labelPrintMode') || 'bitmap';
+  if (labelPrintMode === 'bitmap') {
+    try {
+      console.log('[IPC] print-label via BITMAP mode');
+      const result = await printLabelBitmap(html, name, widthMm, heightMm, sendRawToPrinter);
+      return result;
+    } catch (err) {
+      console.warn('[IPC] Bitmap label failed:', err.message, '- falling back to GDI');
+    }
+  }
   return await printLabelHTML(html, name, widthMm, heightMm);
 });
 
@@ -1499,7 +1528,7 @@ ipcMain.handle('print-labels-offline', async (event, { labels, printerName, widt
   }
   console.log('[IPC] print-labels-offline:', labels.length, 'labels to:', name);
   try {
-    const result = await printLabelsGDI(labels, name, widthMm || 37.3, heightMm || 28.6);
+    const result = await printLabelsGDI(labels, name, widthMm || 51, heightMm || 25);
     return result;
   } catch (err) {
     console.error('[IPC] print-labels-offline error:', err.message);
@@ -1515,7 +1544,7 @@ ipcMain.handle('print-label-offline', async (event, { labelData, printerName, wi
   }
   console.log('[IPC] print-label-offline:', labelData.productName, 'to:', name);
   try {
-    const result = await printLabelGDI(labelData, name, widthMm || 37.3, heightMm || 28.6);
+    const result = await printLabelGDI(labelData, name, widthMm || 51, heightMm || 25);
     return result;
   } catch (err) {
     console.error('[IPC] print-label-offline error:', err.message);
@@ -1560,9 +1589,9 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
   }
 
   // Convert mm to microns (1mm = 1000 microns)
-  // Default to 37.3x28.6mm to match 4BARCODE 4B-2074B sticker size
-  const w = widthMm || 37.3;
-  const h = heightMm || 28.6;
+  // Default to 51x25mm (2x1 inch) standard sticker size
+  const w = widthMm || 51;
+  const h = heightMm || 25;
   const wMicrons = Math.round(w * 1000);
   const hMicrons = Math.round(h * 1000);
 
@@ -1623,7 +1652,7 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             }
           }
         );
-      }, 2000); // Wait 2s for base64 images to fully render
+      }, 1000); // Wait 1s for base64 images to fully render
     });
 
     printWin.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
@@ -2178,7 +2207,7 @@ async function testPrintLabel() {
     console.log(`[Test Label] Printing to: ${printerName}`);
     console.log(`[Test Label] Available printers: ${printerList}`);
 
-    const result = await printLabelGDI(testLabel, printerName, 37.3, 28.6);
+    const result = await printLabelGDI(testLabel, printerName, 51, 25);
     
     dialog.showMessageBox(mainWindow, {
       type: 'info',

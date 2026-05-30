@@ -71,7 +71,7 @@ pre {
 // ─── GDI Label Printing (Windows Driver) ────────────────────────────────────
 // Prints a product label using the Windows printer driver.
 // Uses pixel-based sizing for the BrowserWindow and mm-based for the print output.
-async function printLabelGDI(labelData, printerName, widthMm = 37.3, heightMm = 28.6) {
+async function printLabelGDI(labelData, printerName, widthMm = 51, heightMm = 25) {
   if (!printerName) throw new Error('No label printer configured');
 
   const { productName, price, barcode, storeName, date, weight, unit } = labelData;
@@ -91,8 +91,8 @@ async function printLabelGDI(labelData, printerName, widthMm = 37.3, heightMm = 
   // the print system scales it to the label size.
   
   // Calculate pixel dimensions at 96 DPI for the label
-  const pxWidth = Math.round(widthMm * 96 / 25.4);  // ~141px for 37.3mm
-  const pxHeight = Math.round(heightMm * 96 / 25.4); // ~108px for 28.6mm
+  const pxWidth = Math.round(widthMm * 96 / 25.4);  // ~192px for 51mm (2")
+  const pxHeight = Math.round(heightMm * 96 / 25.4); // ~94px for 25mm (1")
 
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -182,7 +182,7 @@ html, body {
 }
 
 // ─── Batch Label Printing ───────────────────────────────────────────────────
-async function printLabelsGDI(labels, printerName, widthMm = 37.3, heightMm = 28.6) {
+async function printLabelsGDI(labels, printerName, widthMm = 51, heightMm = 25) {
   if (!printerName) throw new Error('No label printer configured');
   if (!labels || labels.length === 0) throw new Error('No labels to print');
 
@@ -202,7 +202,7 @@ async function printLabelsGDI(labels, printerName, widthMm = 37.3, heightMm = 28
       }
       // Small delay between labels to avoid overwhelming the printer
       if (i < copies - 1 || labels.indexOf(label) < labels.length - 1) {
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 200));
       }
     }
   }
@@ -256,7 +256,7 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
             reject(new Error(failureReason || 'GDI print failed'));
           }
         });
-      }, 2000); // Wait 2s for content/fonts to fully render before printing
+      }, 1000); // Wait 1s for content/fonts to fully render before printing
     });
 
     printWin.webContents.on('did-fail-load', (_event, _code, desc) => {

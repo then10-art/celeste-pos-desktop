@@ -132,7 +132,7 @@ function renderHTMLToBitmap(html, targetWidth) {
           printWin.setContentSize(targetWidth, contentHeight);
 
           // Wait a bit for resize to take effect
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 200));
 
           // Capture the full page
           const image = await printWin.webContents.capturePage({
@@ -163,7 +163,7 @@ function renderHTMLToBitmap(html, targetWidth) {
           try { fs.unlinkSync(tmpFile); } catch {}
           reject(err);
         }
-      }, 3000); // Wait 3s for images/fonts to fully render
+      }, 1000); // Wait 1s for images/fonts to fully render
     });
 
     printWin.webContents.on('did-fail-load', (_event, _code, desc) => {
@@ -298,11 +298,208 @@ function buildRasterCommands(monoData, bytesPerLine, height, pixelWidth) {
   return Buffer.concat(chunks);
 }
 
+/**
+ * Print label HTML as a bitmap via ESC/POS raster commands.
+ * Same approach as receipt bitmap but sized for labels.
+ * 
+ * @param {string} html - Full HTML label document (from web app buildLabelPrintHTML)
+ * @param {string} printerName - Windows printer name
+ * @param {number} widthMm - Label width in mm (default 51 = 2 inches)
+ * @param {number} heightMm - Label height in mm (default 25 = 1 inch)
+ * @param {Function} sendRawFn - Function to send raw bytes to printer
+ * @returns {Promise<{success: boolean, method: string}>}
+ */
+async function printLabelBitmap(html, printerName, widthMm = 51, heightMm = 25, sendRawFn) {
+  if (!printerName) throw new Error('No printer configured for bitmap label printing');
+  if (!sendRawFn) throw new Error('sendRawToPrinter function required');
+
+  // Calculate pixel dimensions at 203 DPI (thermal printer native resolution)
+  const pixelWidth = Math.round(widthMm * PRINTER_DPI / 25.4);
+  const pixelHeight = Math.round(heightMm * PRINTER_DPI / 25.4);
+  const bytesPerLine = Math.ceil(pixelWidth / 8);
+
+  console.log(`[BitmapLabel] Starting: printer=${printerName}, size=${widthMm}x${heightMm}mm, pixels=${pixelWidth}x${pixelHeight}`);
+
+  try {
+    // Step 1: Render label HTML to bitmap at exact label dimensions
+    const bitmap = await renderLabelToBitmap(html, pixelWidth, pixelHeight);
+    console.log(`[BitmapLabel] Rendered bitmap: ${bitmap.width}x${bitmap.height}px`);
+
+    // Step 2: Convert to 1-bit monochrome
+    const monoData = convertToMonochrome(bitmap.data, bitmap.width, bitmap.height);
+    console.log(`[BitmapLabel] Monochrome: ${monoData.length} bytes`);
+
+    // Step 3: Build ESC/POS raster commands (no paper cut for labels)
+    const escposData = buildLabelRasterCommands(monoData, bytesPerLine, bitmap.height, pixelWidth);
+    console.log(`[BitmapLabel] ESC/POS data: ${escposData.length} bytes`);
+
+    // Step 4: Send to printer
+    const result = await sendRawFn(escposData, printerName);
+    console.log(`[BitmapLabel] Print result:`, result);
+
+    return { success: true, method: 'bitmap-label-escpos', bytes: escposData.length };
+  } catch (err) {
+    console.error(`[BitmapLabel] Error:`, err.message);
+    throw err;
+  }
+}
+
+/**
+ * Render label HTML to a bitmap at exact label dimensions.
+ * Unlike receipt rendering (variable height), labels have a fixed size.
+ */
+function renderLabelToBitmap(html, targetWidth, targetHeight) {
+  return new Promise((resolve, reject) => {
+    const tmpFile = path.join(os.tmpdir(), `celeste-label-bitmap-${Date.now()}.html`);
+
+    // The label HTML uses mm units (e.g., width: 51mm).
+    // In a browser, 1mm CSS = 96/25.4 = ~3.78px.
+    // But we want 1mm = 203/25.4 = ~7.99px (printer DPI).
+    // So we need to zoom by 203/96 = ~2.115x to make mm units map to printer pixels.
+    const zoomFactor = PRINTER_DPI / 96;
+
+    // Inject CSS to scale the mm-based label to fill the 203 DPI pixel window
+    const enhancedHtml = html.replace('</head>', `
+      <style>
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        html {
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #fff !important;
+          overflow: hidden !important;
+        }
+        body {
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #fff !important;
+          overflow: hidden !important;
+          transform-origin: top left;
+          zoom: ${zoomFactor};
+        }
+        /* High contrast for thermal \u2014 all text pure black */
+        * { color: #000 !important; }
+        /* Crisp image rendering for QR codes and barcodes */
+        img { image-rendering: pixelated; image-rendering: -webkit-optimize-contrast; }
+      </style>
+    </head>`);
+
+    fs.writeFileSync(tmpFile, enhancedHtml, 'utf-8');
+
+    const printWin = new BrowserWindow({
+      show: false,
+      width: targetWidth,
+      height: targetHeight,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        offscreen: true,
+      },
+    });
+
+    printWin.setContentSize(targetWidth, targetHeight);
+    printWin.loadFile(tmpFile);
+
+    printWin.webContents.on('did-finish-load', () => {
+      // Wait for base64 images (QR, barcode) to render
+      setTimeout(async () => {
+        try {
+          const image = await printWin.webContents.capturePage({
+            x: 0,
+            y: 0,
+            width: targetWidth,
+            height: targetHeight,
+          });
+
+          printWin.close();
+          try { fs.unlinkSync(tmpFile); } catch {}
+
+          const size = image.getSize();
+          const bitmap = image.toBitmap();
+
+          resolve({
+            data: bitmap,
+            width: size.width,
+            height: size.height,
+          });
+        } catch (err) {
+          printWin.close();
+          try { fs.unlinkSync(tmpFile); } catch {}
+          reject(err);
+        }
+      }, 1000); // 1s for base64 QR/barcode images to render
+    });
+
+    printWin.webContents.on('did-fail-load', (_event, _code, desc) => {
+      try { printWin.close(); } catch {}
+      try { fs.unlinkSync(tmpFile); } catch {}
+      reject(new Error(`Failed to load label HTML: ${desc}`));
+    });
+
+    setTimeout(() => {
+      try { printWin.close(); } catch {}
+      try { fs.unlinkSync(tmpFile); } catch {}
+      reject(new Error('Label bitmap render timeout (15s)'));
+    }, 15000);
+  });
+}
+
+/**
+ * Build ESC/POS raster commands for a label.
+ * Same as receipt raster but NO paper cut and minimal feed.
+ */
+function buildLabelRasterCommands(monoData, bytesPerLine, height, pixelWidth) {
+  const chunks = [];
+
+  // ESC @ - Initialize printer
+  chunks.push(Buffer.from([0x1B, 0x40]));
+
+  // ESC a 0 - Left alignment (labels should be left-aligned)
+  chunks.push(Buffer.from([0x1B, 0x61, 0x00]));
+
+  // Set line spacing to 0 for seamless bitmap
+  chunks.push(Buffer.from([0x1B, 0x33, 0x00]));
+
+  // Print bitmap in chunks
+  const MAX_CHUNK_LINES = 255;
+  let linesRemaining = height;
+  let offset = 0;
+
+  while (linesRemaining > 0) {
+    const chunkLines = Math.min(linesRemaining, MAX_CHUNK_LINES);
+    const chunkDataSize = bytesPerLine * chunkLines;
+
+    const cmd = Buffer.alloc(8 + chunkDataSize);
+    cmd[0] = 0x1D; // GS
+    cmd[1] = 0x76; // v
+    cmd[2] = 0x30; // 0
+    cmd[3] = 0x00; // m = 0 (normal density)
+    cmd[4] = bytesPerLine & 0xFF;
+    cmd[5] = (bytesPerLine >> 8) & 0xFF;
+    cmd[6] = chunkLines & 0xFF;
+    cmd[7] = (chunkLines >> 8) & 0xFF;
+
+    monoData.copy(cmd, 8, offset, offset + chunkDataSize);
+    chunks.push(cmd);
+    offset += chunkDataSize;
+    linesRemaining -= chunkLines;
+  }
+
+  // Minimal feed (2 lines) — just enough to clear the print head
+  chunks.push(Buffer.from([0x1B, 0x64, 0x02]));
+
+  // NO paper cut for labels — they are pre-cut stickers
+
+  return Buffer.concat(chunks);
+}
+
 module.exports = {
   printReceiptBitmap,
+  printLabelBitmap,
   renderHTMLToBitmap,
+  renderLabelToBitmap,
   convertToMonochrome,
   buildRasterCommands,
+  buildLabelRasterCommands,
   PRINTER_DPI,
   PIXELS_PER_LINE,
   BYTES_PER_LINE,
