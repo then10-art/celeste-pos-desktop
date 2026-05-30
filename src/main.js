@@ -36,8 +36,8 @@ try {
 
 // ─── App Configuration ───────────────────────────────────────────────────────
 const isDev = process.argv.includes('--dev');
-const CLOUD_URL = 'https://celestepos.manus.space';
-const UPDATE_SERVER = 'https://celestepos.manus.space/api/updates/';
+const CLOUD_URL = 'https://celestepos.live';
+const UPDATE_SERVER = 'https://celestepos.live/api/updates/';
 
 // ─── Persistent Settings Store ───────────────────────────────────────────────
 const store = new Store({
@@ -607,6 +607,21 @@ function buildAppMenu() {
           label: 'Recargar',
           accelerator: 'F5',
           click: () => mainWindow.reload()
+        },
+        {
+          label: 'Recargar (Limpiar Cache)',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click: async () => {
+            try {
+              const { session } = require('electron');
+              await session.defaultSession.clearCache();
+              await session.defaultSession.clearStorageData({ storages: ['cachestorage', 'serviceworkers'] });
+              console.log('[App] Cache cleared via menu');
+            } catch (e) {
+              console.log('[App] Cache clear failed:', e.message);
+            }
+            mainWindow.webContents.reloadIgnoringCache();
+          }
         },
         {
           label: 'Pantalla Completa',
@@ -2080,6 +2095,22 @@ function showAbout() {
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
+  // Clear web cache on version update to ensure latest UI loads
+  const { session } = require('electron');
+  const currentVersion = require('../package.json').version;
+  const lastVersion = store.get('lastAppVersion', '');
+  if (lastVersion !== currentVersion) {
+    console.log(`[App] Version changed ${lastVersion} → ${currentVersion}, clearing cache...`);
+    try {
+      await session.defaultSession.clearCache();
+      await session.defaultSession.clearStorageData({ storages: ['cachestorage', 'serviceworkers'] });
+      console.log('[App] Cache cleared successfully');
+    } catch (e) {
+      console.log('[App] Cache clear failed:', e.message);
+    }
+    store.set('lastAppVersion', currentVersion);
+  }
+
   // Initialize local database
   await initDatabase();
 
