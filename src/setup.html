@@ -223,9 +223,12 @@
 
       <!-- Print mode -->
       <div class="section-label">Modo de Impresión</div>
-      <div class="mode-toggle">
+      <div class="mode-toggle" style="grid-template-columns: 1fr 1fr 1fr;">
         <div class="mode-opt selected" id="modeGDI" onclick="selectMode('gdi')">
           Windows (GDI) <small>Más compatible</small>
+        </div>
+        <div class="mode-opt" id="modeBitmap" onclick="selectMode('bitmap')">
+          Bitmap HD <small>Alta calidad</small>
         </div>
         <div class="mode-opt" id="modeRAW" onclick="selectMode('raw')">
           Directo (ESC/POS) <small>Más rápido</small>
@@ -378,6 +381,7 @@
     function selectMode(mode) {
       selectedMode = mode;
       document.getElementById('modeGDI').classList.toggle('selected', mode === 'gdi');
+      document.getElementById('modeBitmap').classList.toggle('selected', mode === 'bitmap');
       document.getElementById('modeRAW').classList.toggle('selected', mode === 'raw');
     }
 

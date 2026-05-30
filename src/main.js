@@ -36,8 +36,8 @@ try {
 
 // ─── App Configuration ───────────────────────────────────────────────────────
 const isDev = process.argv.includes('--dev');
-const CLOUD_URL = 'https://celestepos.live';
-const UPDATE_SERVER = 'https://celestepos.live/api/updates/';
+const CLOUD_URL = 'https://celestepos.manus.space';
+const UPDATE_SERVER = 'https://celestepos.manus.space/api/updates/';
 
 // ─── Persistent Settings Store ───────────────────────────────────────────────
 const store = new Store({
@@ -109,13 +109,28 @@ function createSetupWindow() {
   // Load the local setup page
   setupWindow.loadFile(path.join(__dirname, 'setup.html'));
 
-  // Inject version after load
+  // Inject version and setup bridge after load
   setupWindow.webContents.on('did-finish-load', () => {
-    setupWindow.webContents.executeJavaScript(
-      `window.__CELESTE_VERSION__ = '${app.getVersion()}';
-       const vEl = document.getElementById('appVersion');
-       if (vEl) vEl.textContent = '${app.getVersion()}';`
-    ).catch(() => {});
+    setupWindow.webContents.executeJavaScript(`
+      window.__CELESTE_VERSION__ = '${app.getVersion()}';
+      const vEl = document.getElementById('appVersion');
+      if (vEl) vEl.textContent = '${app.getVersion()}';
+
+      // Inject CelesteSetup bridge using nodeIntegration
+      try {
+        const { ipcRenderer } = require('electron');
+        window.CelesteSetup = {
+          validateAndSave: (code) => ipcRenderer.invoke('setup-validate-tenant', code),
+          getAvailablePrinters: () => ipcRenderer.invoke('setup-get-printers'),
+          testPrint: (printerName, paperSize, printMode) => ipcRenderer.invoke('setup-test-print', { printerName, paperSize, printMode }),
+          savePrinterSetup: (config) => ipcRenderer.invoke('setup-save-printer', config),
+          finishSetup: () => ipcRenderer.invoke('setup-finish'),
+        };
+        console.log('[Setup] Bridge injected successfully');
+      } catch (err) {
+        console.error('[Setup] Failed to inject bridge:', err);
+      }
+    `).catch(() => {});
   });
 
   setupWindow.once('ready-to-show', () => {
