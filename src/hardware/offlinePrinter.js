@@ -20,52 +20,16 @@ const fs = require('fs');
 // ─── GDI Receipt Printing (Windows Driver - like Eleventa) ──────────────────
 async function printReceiptGDI(receiptData, printerName, paperSize = '80') {
   if (!printerName) throw new Error('No printer configured');
-
-  const maxCols = (paperSize === '58') ? 32 : 42;
   const widthMm = (paperSize === '58') ? 58 : 80;
-  const fontSize = (paperSize === '58') ? '10pt' : '12pt';
-  // Line height in mm at 12pt with 1.3 line-height:
-  // 12pt = 4.23mm, × 1.3 = ~5.5mm per line. Add 4mm padding top+bottom.
-  const lineHeightMm = (paperSize === '58') ? 4.8 : 5.5;
-  const paddingMm = 4;
 
-  // Build plain text receipt
-  const textLines = buildReceiptText(receiptData, maxCols);
-  const textContent = textLines.join('\n');
+  // Use the RICH HTML template (same as bitmap mode) for professional look
+  // This gives us logo, social media, QR code, formatted items - everything
+  const { generateReceiptHTMLForBitmap } = require('./receiptHtmlGenerator');
+  const html = generateReceiptHTMLForBitmap(receiptData, paperSize);
 
-  // Calculate receipt height from line count so the paper cuts at the right place
-  const receiptHeightMm = Math.ceil(textLines.length * lineHeightMm) + paddingMm + 20; // +20mm feed
-
-  // Wrap in minimal HTML with Courier New (like Eleventa uses)
-  const html = `<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-@page { margin: 0; size: ${widthMm}mm ${receiptHeightMm}mm; }
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: 'Courier New', 'Lucida Console', monospace;
-  font-size: ${fontSize};
-  width: ${widthMm}mm;
-  margin: 0;
-  padding: 2mm;
-  line-height: 1.3;
-  color: #000;
-  background: #fff;
-  -webkit-print-color-adjust: exact;
-}
-pre {
-  font-family: inherit;
-  font-size: inherit;
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  margin: 0;
-}
-</style></head><body>
-<pre>${escapeHtml(textContent)}</pre>
-</body></html>`;
-
-  console.log(`[ReceiptGDI] ${textLines.length} lines → ${receiptHeightMm}mm height, printer: ${printerName}`);
-  return await printHTMLDocument(html, printerName, widthMm, receiptHeightMm);
+  console.log(`[ReceiptGDI] Using rich HTML template, printer: ${printerName}, paper: ${paperSize}mm`);
+  // Pass null for height so it uses the tall window (receipt length varies)
+  return await printHTMLDocument(html, printerName, widthMm, null);
 }
 
 // ─── GDI Label Printing (Windows Driver) ────────────────────────────────────
