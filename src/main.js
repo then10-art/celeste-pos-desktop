@@ -1666,6 +1666,13 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
     printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
+      // Inject CSS to absolutely prevent any overflow that could cause a blank second page
+      printWin.webContents.insertCSS(`
+        html, body { width: ${pxWidth}px !important; height: ${pxHeight}px !important; max-height: ${pxHeight}px !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; }
+        .label { width: ${pxWidth}px !important; height: ${pxHeight}px !important; max-height: ${pxHeight}px !important; overflow: hidden !important; }
+        @page { size: ${w}mm ${h}mm; margin: 0 !important; }
+      `).catch(() => {});
+
       // Wait for images/barcodes/QR codes to fully render
       setTimeout(() => {
         printWin.webContents.print(
@@ -1676,6 +1683,7 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             margins: { marginType: 'none' },
             pageSize: { width: wMicrons, height: hMicrons },
             copies: 1,
+            scaleFactor: 100,
             pageRanges: [{ from: 0, to: 0 }],
           },
           (success, failureReason) => {

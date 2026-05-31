@@ -94,30 +94,35 @@ async function printLabelGDI(labelData, printerName, widthMm = 51, heightMm = 25
   const pxWidth = Math.round(widthMm * 96 / 25.4);  // ~192px for 51mm (2")
   const pxHeight = Math.round(heightMm * 96 / 25.4); // ~94px for 25mm (1")
 
+  const labelPxW = Math.floor(widthMm * 96 / 25.4);
+  const labelPxH = Math.floor(heightMm * 96 / 25.4);
+
   const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-@media print {
-  @page {
-    margin: 0;
-    size: ${widthMm}mm ${heightMm}mm;
-  }
+@page {
+  margin: 0 !important;
+  size: ${widthMm}mm ${heightMm}mm;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
-  width: ${widthMm}mm;
-  height: ${heightMm}mm;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
+  width: ${labelPxW}px;
+  height: ${labelPxH}px;
+  max-height: ${labelPxH}px;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
   color: #000;
   background: #fff;
+  font-size: 0;
+  line-height: 0;
   -webkit-print-color-adjust: exact;
   print-color-adjust: exact;
 }
 .label {
-  width: ${widthMm}mm;
-  height: ${heightMm}mm;
+  width: ${labelPxW}px;
+  height: ${labelPxH}px;
+  max-height: ${labelPxH}px;
   padding: 1mm;
   display: flex;
   flex-direction: column;
@@ -125,6 +130,10 @@ html, body {
   justify-content: center;
   font-family: Arial, Helvetica, sans-serif;
   overflow: hidden;
+  font-size: initial;
+  line-height: normal;
+  page-break-after: avoid;
+  break-after: avoid;
 }
 .store {
   font-size: 6pt;
@@ -228,9 +237,23 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
+    // Set content size to exact label dimensions to prevent blank second page
+    if (heightMm) {
+      printWin.setContentSize(pxWidth, pxHeight);
+    }
+
     printWin.loadFile(tmpFile);
 
     printWin.webContents.on('did-finish-load', () => {
+      // Inject CSS to prevent blank second page on label printers
+      if (heightMm) {
+        printWin.webContents.insertCSS(`
+          html, body { width: ${pxWidth}px !important; height: ${pxHeight}px !important; max-height: ${pxHeight}px !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; }
+          .label { width: ${pxWidth}px !important; height: ${pxHeight}px !important; max-height: ${pxHeight}px !important; overflow: hidden !important; }
+          @page { size: ${widthMm}mm ${heightMm}mm; margin: 0 !important; }
+        `).catch(() => {});
+      }
+
       // Wait for fonts and content to fully render
       setTimeout(() => {
         const wMicrons = Math.round(widthMm * 1000);
@@ -244,7 +267,8 @@ function printHTMLDocument(html, printerName, widthMm, heightMm) {
           deviceName: printerName,
           margins: { marginType: 'none' },
           pageSize: { width: wMicrons, height: hMicrons },
-          // Don't set scaleFactor — let the system auto-scale to fit
+          scaleFactor: 100,
+          pageRanges: heightMm ? [{ from: 0, to: 0 }] : undefined,
         }, (success, failureReason) => {
           printWin.close();
           try { fs.unlinkSync(tmpFile); } catch {}
