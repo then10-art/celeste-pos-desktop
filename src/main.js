@@ -1505,17 +1505,54 @@ ipcMain.handle('print-label', async (event, { html, printerName, widthMm, height
   if (!name) {
     return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
   }
-  const labelPrintMode = store.get('labelPrintMode') || 'bitmap';
-  if (labelPrintMode === 'bitmap') {
+  // GDI mode (Windows print driver) - most reliable for label printers
+  // Bitmap mode was producing blank output (offscreen rendering issues)
+  try {
+    console.log('[IPC] print-label: using GDI mode to:', name, 'size:', widthMm, 'x', heightMm, 'mm');
+    const result = await printLabelHTML(html, name, widthMm || 50.8, heightMm || 25.4);
+    console.log('[IPC] print-label GDI result:', JSON.stringify(result));
+    return result;
+  } catch (gdiErr) {
+    console.error('[IPC] print-label GDI failed:', gdiErr.message);
+    // Try bitmap as fallback (in case GDI driver has issues)
     try {
-      console.log('[IPC] print-label via BITMAP mode');
-      const result = await printLabelBitmap(html, name, widthMm, heightMm, sendRawToPrinter);
+      console.log('[IPC] print-label: trying BITMAP fallback');
+      const result = await printLabelBitmap(html, name, widthMm || 50.8, heightMm || 25.4, sendRawToPrinter);
       return result;
-    } catch (err) {
-      console.warn('[IPC] Bitmap label failed:', err.message, '- falling back to GDI');
+    } catch (bitmapErr) {
+      return { success: false, error: 'GDI: ' + gdiErr.message + ' | Bitmap: ' + bitmapErr.message };
     }
   }
-  return await printLabelHTML(html, name, widthMm, heightMm);
+});
+
+// --- Batch Label Printing via GDI (HTML array -> GDI print) ---
+ipcMain.handle('print-labels-bitmap', async (event, { htmlLabels, printerName, widthMm, heightMm }) => {
+  const labelPrinter = store.get('labelPrinterName');
+  const name = printerName || labelPrinter;
+  if (!name) {
+    return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
+  }
+  console.log('[IPC] print-labels-bitmap:', htmlLabels.length, 'labels to:', name, 'size:', widthMm, 'x', heightMm, 'mm');
+  let printed = 0;
+  const errors = [];
+  for (let i = 0; i < htmlLabels.length; i++) {
+    try {
+      await printLabelHTML(htmlLabels[i], name, widthMm || 50.8, heightMm || 25.4);
+      printed++;
+      console.log('[IPC] print-labels-bitmap: label ' + (i+1) + '/' + htmlLabels.length + ' printed via GDI');
+      if (i < htmlLabels.length - 1) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch (err) {
+      console.error('[IPC] print-labels-bitmap: label ' + (i+1) + ' GDI failed:', err.message);
+      errors.push('Label ' + (i+1) + ': ' + err.message);
+      break;
+    }
+  }
+  if (printed > 0) {
+    return { success: true, method: 'gdi', printed, total: htmlLabels.length, errors: errors.length > 0 ? errors : undefined };
+  }
+  return { success: false, error: errors.join('; ') || 'All labels failed to print' };
 });
 
 // ─── Offline Label Printing (structured data, no HTML from web app) ─────────
