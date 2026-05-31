@@ -333,11 +333,11 @@ ipcMain.handle('setup-save-printer', async (event, config) => {
       address: '',
       printerName: printerName || '',
       paperSize: paperSize || '80',
-      printMode: printMode || 'gdi',
+      printMode: printMode || 'bitmap',
     };
     store.set('printerConfig', printerConfig);
     // Also save printMode at top level (where print-receipt handler reads it)
-    store.set('printMode', printMode || 'gdi');
+    store.set('printMode', printMode || 'bitmap');
     console.log('[Setup] Printer config saved:', printerConfig);
     return { success: true };
   } catch (err) {
@@ -415,10 +415,20 @@ async function launchMainApp() {
   if (!store.get('_migratedToGdi_v2')) {
     const oldMode = store.get('printMode');
     if (oldMode === 'raw' || !oldMode) {
-      console.log('[App] Migration: switching printMode from', oldMode || '(unset)', 'to gdi');
-      store.set('printMode', 'gdi');
+      console.log('[App] Migration: switching printMode from', oldMode || '(unset)', 'to bitmap');
+      store.set('printMode', 'bitmap');
     }
     store.set('_migratedToGdi_v2', true);
+  }
+
+  // v2.8.3 migration: switch from GDI to bitmap (GDI shows Windows print dialog on some systems)
+  if (!store.get('_migratedToBitmap_v283')) {
+    const currentMode = store.get('printMode');
+    if (currentMode === 'gdi') {
+      console.log('[App] Migration v2.8.3: switching printMode from gdi to bitmap (silent print fix)');
+      store.set('printMode', 'bitmap');
+    }
+    store.set('_migratedToBitmap_v283', true);
   }
 
   // Auto-detect and save printer if not configured (e.g., after update from older version)
@@ -431,9 +441,9 @@ async function launchMainApp() {
         console.log('[App] Auto-detected printer:', detectedName);
         store.set('printerConfig.printerName', detectedName);
         store.set('printerConfig.type', 'usb');
-        // Default to GDI mode (Windows Driver) - most compatible with manufacturer drivers
+        // Default to bitmap mode - sends raw ESC/POS raster, bypasses Windows print system entirely
         if (!store.get('printMode')) {
-          store.set('printMode', 'gdi');
+          store.set('printMode', 'bitmap');
         }
         // Re-init hardware with the detected printer name
         await setupHardware(store.get('printerConfig'), mainWindow);
@@ -1423,7 +1433,7 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   // Determine print mode: 'gdi' (Windows Driver, like Eleventa) or 'raw' (ESC/POS)
   // Default is 'gdi' (Windows Driver) - most compatible with manufacturer drivers (AOKIA, Epson, etc.)
   // RAW ESC/POS only works with "Generic / Text Only" driver
-  const printMode = store.get('printMode') || 'gdi';
+  const printMode = store.get('printMode') || 'bitmap';
   const printerName = store.get('printerConfig.printerName') || await getAutoDetectedPrinterName();
   console.log('[IPC] print-receipt mode:', printMode, 'printer:', printerName, 'paperSize:', paperSize);
 
@@ -2392,7 +2402,7 @@ async function runPrintDiagnostic() {
   
   // Configured printer
   const configuredPrinter = store.get('printerConfig.printerName') || '(no configurada)';
-  const printMode = store.get('printMode') || 'gdi';
+  const printMode = store.get('printMode') || 'bitmap';
   results.push(`Impresora configurada: ${configuredPrinter}`);
   results.push(`Modo de impresión: ${printMode}`);
   results.push('');
