@@ -34,18 +34,10 @@ try {
   console.log('[Updater] electron-updater not available:', e.message);
 }
 
-// ─── High-DPI & Rendering Quality ────────────────────────────────────────────
-// Enable crisp text rendering on high-DPI displays and standard monitors
-app.commandLine.appendSwitch('enable-features', 'CanvasOopRasterization');
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('force-color-profile', 'srgb');
-// Ensure proper font rendering
-app.commandLine.appendSwitch('disable-lcd-text', 'false');
-
 // ─── App Configuration ───────────────────────────────────────────────────────
 const isDev = process.argv.includes('--dev');
-const CLOUD_URL = 'https://celestepos.live';
-const UPDATE_SERVER = 'https://celestepos.live/api/updates/';
+const CLOUD_URL = 'https://celestepos.manus.space';
+const UPDATE_SERVER = 'https://celestepos.manus.space/api/updates/';
 
 // ─── Persistent Settings Store ───────────────────────────────────────────────
 const store = new Store({
@@ -79,10 +71,9 @@ const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getR
 const { syncWithCloud, checkCloudHealth } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName } = require('./hardware');
 const { printReceiptGDI, printLabelGDI, printLabelsGDI } = require('./hardware/offlinePrinter');
-const { printReceiptBitmap, printLabelBitmap } = require('./hardware/bitmapPrinter');
+const { printReceiptBitmap } = require('./hardware/bitmapPrinter');
 const { generateReceiptHTMLForBitmap } = require('./hardware/receiptHtmlGenerator');
 const { startLocalServer } = require('./local-server');
-const { getActiveWebappDir, runBackgroundWebappUpdate } = require('./webapp-updater');
 
 // ─── Local Server State ──────────────────────────────────────────────────────
 let localServerPort = null;
@@ -246,30 +237,7 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
 // ─── IPC: Printer Setup (Step 2 of setup wizard) ────────────────────────────
 ipcMain.handle('setup-get-printers', async () => {
   try {
-    // During setup, mainWindow doesn't exist yet, so we use setupWindow's webContents directly
-    const win = setupWindow || mainWindow;
-    if (!win) {
-      console.log('[Setup] No window available for printer detection');
-      return [];
-    }
-    const printers = win.webContents.getPrinters();
-    const EXCLUDED_PATTERNS = [/fax/i, /onenote/i, /xps/i, /pdf/i, /virtual/i, /remote/i];
-    const RECEIPT_PRINTER_PATTERNS = [/pos-?\d/i, /tm-?[tul]/i, /rp-?\d/i, /sp-?\d/i, /ct-?[se]/i, /srp-?\d/i, /btp-?/i, /star\s/i, /citizen/i, /bixolon/i, /sewoo/i, /rongta/i, /munbyn/i, /hoin/i, /xprinter/i];
-    const result = [];
-    for (const p of printers) {
-      const isExcluded = EXCLUDED_PATTERNS.some(rx => rx.test(p.name));
-      const isReceipt = RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name));
-      result.push({
-        name: p.name,
-        displayName: p.displayName || p.name,
-        status: p.status === 0 ? 'ready' : 'offline',
-        isDefault: p.isDefault,
-        isReceipt: !isExcluded && isReceipt,
-        type: 'system',
-      });
-    }
-    console.log(`[Setup] Found ${result.length} printers`);
-    return result;
+    return await getAvailablePrinters();
   } catch (err) {
     console.error('[Setup] getAvailablePrinters error:', err.message);
     return [];
@@ -360,7 +328,7 @@ ipcMain.handle('setup-test-label-print', async (event, { printerName }) => {
       storeName: store.get('tenantName') || 'CELESTE POS',
       date: new Date().toLocaleDateString('es-DO'),
     };
-    const result = await printLabelGDI(labelData, printerName, 51, 25);
+    const result = await printLabelGDI(labelData, printerName, 37.3, 28.6);
     return result;
   } catch (err) {
     console.error('[Setup] testLabelPrint error:', err.message);
@@ -380,15 +348,13 @@ ipcMain.handle('setup-finish', async () => {
 
 // ─── Main App Launch ─────────────────────────────────────────────────────────
 async function launchMainApp() {
-  // Start local server with the best available webapp directory
-  // Prefers: cached update > bundled webapp > cloud URL fallback
+  // Start local server for bundled frontend
   try {
-    const webappDir = getActiveWebappDir();
-    const result = await startLocalServer(webappDir);
+    const result = await startLocalServer();
     if (result) {
       localServerPort = result.port;
       localServerInstance = result.server;
-      console.log(`[App] Local server started on port ${localServerPort} (serving: ${webappDir})`);
+      console.log(`[App] Local server started on port ${localServerPort}`);
     } else {
       console.log('[App] No local webapp found — using cloud URL');
     }
@@ -398,14 +364,6 @@ async function launchMainApp() {
 
   // Create main window
   createWindow();
-
-  // Background: check for webapp UI updates (non-blocking)
-  // This downloads new UI files that will be used on next restart
-  setTimeout(() => {
-    runBackgroundWebappUpdate(store, mainWindow).catch(err => {
-      console.log('[App] Background webapp update check failed:', err.message);
-    });
-  }, 10000); // Wait 10s after startup to avoid competing with initial load
 
   // Setup hardware with mainWindow reference for system printer access
   await setupHardware(store.get('printerConfig'), mainWindow);
@@ -497,21 +455,7 @@ function createWindow() {
     url = `${CLOUD_URL}/t/${tenantSlug}`;
     console.log(`[App] Loading tenant from cloud: ${tenantSlug} → ${url}`);
   }
-  // Add cache-busting timestamp and disable caching headers
-  const cacheBustUrl = `${url}${url.includes('?') ? '&' : '?'}_cb=${Date.now()}`;
-  mainWindow.loadURL(cacheBustUrl, {
-    extraHeaders: 'pragma: no-cache\nCache-Control: no-cache, no-store, must-revalidate\n'
-  });
-
-  // Intercept all requests to add no-cache headers for HTML/JS/CSS
-  mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
-    { urls: ['https://*.live/*', 'https://*.manus.space/*'] },
-    (details, callback) => {
-      details.requestHeaders['Cache-Control'] = 'no-cache';
-      details.requestHeaders['Pragma'] = 'no-cache';
-      callback({ requestHeaders: details.requestHeaders });
-    }
-  );
+  mainWindow.loadURL(url);
 
   // Show window when ready
   mainWindow.once('ready-to-show', () => {
@@ -557,15 +501,6 @@ function createWindow() {
   mainWindow.webContents.on('dom-ready', () => {
     console.log('[App] DOM ready — injecting desktop bridge early');
     injectDesktopBridge();
-    // Unregister any service workers that might serve stale cached content
-    mainWindow.webContents.executeJavaScript(`
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(registrations => {
-          registrations.forEach(r => r.unregister());
-          if (registrations.length > 0) console.log('[Desktop] Unregistered', registrations.length, 'service worker(s)');
-        });
-      }
-    `).catch(() => {});
   });
 
   // Also inject on did-finish-load as a safety net
@@ -672,56 +607,6 @@ function buildAppMenu() {
           label: 'Recargar',
           accelerator: 'F5',
           click: () => mainWindow.reload()
-        },
-        {
-          label: 'Recargar (Limpiar Cache)',
-          accelerator: 'CmdOrCtrl+Shift+R',
-          click: async () => {
-            try {
-              const { session } = require('electron');
-              await session.defaultSession.clearCache();
-              await session.defaultSession.clearStorageData({ storages: ['cachestorage', 'serviceworkers'] });
-              console.log('[App] Cache cleared via menu');
-            } catch (e) {
-              console.log('[App] Cache clear failed:', e.message);
-            }
-            mainWindow.webContents.reloadIgnoringCache();
-          }
-        },
-        {
-          label: 'Actualizar Interfaz',
-          accelerator: 'CmdOrCtrl+Shift+U',
-          click: async () => {
-            try {
-              const { downloadWebappUpdate } = require('./webapp-updater');
-              const { dialog } = require('electron');
-              mainWindow.webContents.executeJavaScript(`
-                document.title = 'Actualizando interfaz...';
-              `).catch(() => {});
-              const success = await downloadWebappUpdate(store, (msg) => {
-                console.log(`[Menu] ${msg}`);
-              });
-              if (success) {
-                dialog.showMessageBox(mainWindow, {
-                  type: 'info',
-                  title: 'Interfaz Actualizada',
-                  message: 'La interfaz se ha actualizado correctamente. La aplicación se recargará ahora.',
-                  buttons: ['Aceptar']
-                }).then(() => {
-                  mainWindow.webContents.reloadIgnoringCache();
-                });
-              } else {
-                dialog.showMessageBox(mainWindow, {
-                  type: 'warning',
-                  title: 'Error',
-                  message: 'No se pudo actualizar la interfaz. Verifique su conexión a internet.',
-                  buttons: ['Aceptar']
-                });
-              }
-            } catch (e) {
-              console.error('[Menu] Force update failed:', e.message);
-            }
-          }
         },
         {
           label: 'Pantalla Completa',
@@ -1386,17 +1271,6 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
     if (!labelPrinter) {
       return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
     }
-    const labelPrintMode = store.get('labelPrintMode') || 'bitmap';
-    if (labelPrintMode === 'bitmap') {
-      try {
-        console.log('[IPC] Label printing via BITMAP mode');
-        const result = await printLabelBitmap(receiptData.html, labelPrinter, receiptData.widthMm, receiptData.heightMm, sendRawToPrinter);
-        return result;
-      } catch (err) {
-        console.warn('[IPC] Bitmap label failed:', err.message, '- falling back to GDI');
-        // Fall through to GDI
-      }
-    }
     return await printLabelHTML(receiptData.html, labelPrinter, receiptData.widthMm, receiptData.heightMm);
   }
 
@@ -1432,12 +1306,6 @@ ipcMain.handle('print-receipt', async (event, receiptData, paperSize) => {
   const hasStoreName = !!receiptData?.storeName;
   const hasLines = !!receiptData?.lines;
   console.log(`[IPC] Receipt data: storeName=${hasStoreName}, items=${itemCount}, lines=${hasLines}, type=${receiptData?.type || 'sale'}`);
-  if (itemCount > 0) {
-    console.log(`[IPC] Receipt items[0]: ${JSON.stringify(receiptData.items[0])}`);
-  } else {
-    console.warn('[IPC] WARNING: Receipt has 0 items! Full data keys:', Object.keys(receiptData || {}).join(', '));
-    console.warn('[IPC] Receipt data snapshot:', JSON.stringify(receiptData).substring(0, 500));
-  }
 
   if (printMode === 'bitmap') {
     // BITMAP mode: Render HTML to high-contrast bitmap, send as ESC/POS raster
@@ -1505,54 +1373,7 @@ ipcMain.handle('print-label', async (event, { html, printerName, widthMm, height
   if (!name) {
     return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
   }
-  // GDI mode (Windows print driver) - most reliable for label printers
-  // Bitmap mode was producing blank output (offscreen rendering issues)
-  try {
-    console.log('[IPC] print-label: using GDI mode to:', name, 'size:', widthMm, 'x', heightMm, 'mm');
-    const result = await printLabelHTML(html, name, widthMm || 50.8, heightMm || 25.4);
-    console.log('[IPC] print-label GDI result:', JSON.stringify(result));
-    return result;
-  } catch (gdiErr) {
-    console.error('[IPC] print-label GDI failed:', gdiErr.message);
-    // Try bitmap as fallback (in case GDI driver has issues)
-    try {
-      console.log('[IPC] print-label: trying BITMAP fallback');
-      const result = await printLabelBitmap(html, name, widthMm || 50.8, heightMm || 25.4, sendRawToPrinter);
-      return result;
-    } catch (bitmapErr) {
-      return { success: false, error: 'GDI: ' + gdiErr.message + ' | Bitmap: ' + bitmapErr.message };
-    }
-  }
-});
-
-// --- Batch Label Printing via GDI (HTML array -> GDI print) ---
-ipcMain.handle('print-labels-bitmap', async (event, { htmlLabels, printerName, widthMm, heightMm }) => {
-  const labelPrinter = store.get('labelPrinterName');
-  const name = printerName || labelPrinter;
-  if (!name) {
-    return { success: false, error: 'No hay impresora de etiquetas configurada. Configure una en Ajustes > Impresoras.' };
-  }
-  console.log('[IPC] print-labels-bitmap:', htmlLabels.length, 'labels to:', name, 'size:', widthMm, 'x', heightMm, 'mm');
-  let printed = 0;
-  const errors = [];
-  for (let i = 0; i < htmlLabels.length; i++) {
-    try {
-      await printLabelHTML(htmlLabels[i], name, widthMm || 50.8, heightMm || 25.4);
-      printed++;
-      console.log('[IPC] print-labels-bitmap: label ' + (i+1) + '/' + htmlLabels.length + ' printed via GDI');
-      if (i < htmlLabels.length - 1) {
-        await new Promise(r => setTimeout(r, 500));
-      }
-    } catch (err) {
-      console.error('[IPC] print-labels-bitmap: label ' + (i+1) + ' GDI failed:', err.message);
-      errors.push('Label ' + (i+1) + ': ' + err.message);
-      break;
-    }
-  }
-  if (printed > 0) {
-    return { success: true, method: 'gdi', printed, total: htmlLabels.length, errors: errors.length > 0 ? errors : undefined };
-  }
-  return { success: false, error: errors.join('; ') || 'All labels failed to print' };
+  return await printLabelHTML(html, name, widthMm, heightMm);
 });
 
 // ─── Offline Label Printing (structured data, no HTML from web app) ─────────
@@ -1565,7 +1386,7 @@ ipcMain.handle('print-labels-offline', async (event, { labels, printerName, widt
   }
   console.log('[IPC] print-labels-offline:', labels.length, 'labels to:', name);
   try {
-    const result = await printLabelsGDI(labels, name, widthMm || 51, heightMm || 25);
+    const result = await printLabelsGDI(labels, name, widthMm || 37.3, heightMm || 28.6);
     return result;
   } catch (err) {
     console.error('[IPC] print-labels-offline error:', err.message);
@@ -1581,7 +1402,7 @@ ipcMain.handle('print-label-offline', async (event, { labelData, printerName, wi
   }
   console.log('[IPC] print-label-offline:', labelData.productName, 'to:', name);
   try {
-    const result = await printLabelGDI(labelData, name, widthMm || 51, heightMm || 25);
+    const result = await printLabelGDI(labelData, name, widthMm || 37.3, heightMm || 28.6);
     return result;
   } catch (err) {
     console.error('[IPC] print-label-offline error:', err.message);
@@ -1626,47 +1447,25 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
   }
 
   // Convert mm to microns (1mm = 1000 microns)
-  // Default to 51x25mm (2x1 inch) standard sticker size
-  const w = widthMm || 51;
-  const h = heightMm || 25;
-  const wMicrons = Math.round(w * 1000);
-  const hMicrons = Math.round(h * 1000);
+  // Default to 37.3x28.6mm to match 4BARCODE 4B-2074B sticker size
+  const wMicrons = Math.round((widthMm || 37.3) * 1000);
+  const hMicrons = Math.round((heightMm || 28.6) * 1000);
 
-  // Calculate pixel dimensions at 96 DPI to match label size exactly
-  // This prevents Chromium from creating a phantom second page
-  const pxWidth = Math.max(200, Math.round(w * 96 / 25.4));
-  const pxHeight = Math.round(h * 96 / 25.4);
-
-  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${w}x${h}mm), Window: ${pxWidth}x${pxHeight}px`);
-  console.log(`[Label Print] HTML length: ${html.length} chars`);
+  console.log(`[Label Print] Printer: ${printerName}, Size: ${wMicrons}x${hMicrons} microns (${widthMm || 37.3}x${heightMm || 28.6}mm)`);
 
   return new Promise((resolve, reject) => {
     const { BrowserWindow: BW } = require('electron');
-    const fs = require('fs');
-    const path = require('path');
-    const os = require('os');
-
-    // Write HTML to temp file instead of data: URL
-    // data: URLs have size limits and truncate base64 barcode/QR images
-    const tmpFile = path.join(os.tmpdir(), `celeste-label-${Date.now()}.html`);
-    fs.writeFileSync(tmpFile, html, 'utf-8');
-
     const printWin = new BW({
       show: false,
-      // Match window size to label pixel dimensions to prevent blank second page
-      width: pxWidth,
-      height: pxHeight,
+      width: 800,
+      height: 600,
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
 
-    // Set content size to exact label dimensions
-    printWin.setContentSize(pxWidth, pxHeight);
-
-    // Load from file — no size limits for base64 images
-    printWin.loadFile(tmpFile);
+    printWin.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 
     printWin.webContents.on('did-finish-load', () => {
-      // Wait for images/barcodes/QR codes to fully render
+      // Wait a moment for images/barcodes to render
       setTimeout(() => {
         printWin.webContents.print(
           {
@@ -1675,12 +1474,10 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             deviceName: printerName,
             margins: { marginType: 'none' },
             pageSize: { width: wMicrons, height: hMicrons },
-            copies: 1,
-            pageRanges: [{ from: 0, to: 0 }],
+            // Don't set scaleFactor — let the system auto-scale to fit the label
           },
           (success, failureReason) => {
             printWin.close();
-            try { fs.unlinkSync(tmpFile); } catch {}
             if (success) {
               console.log('[Label Print] Success');
               resolve({ success: true });
@@ -1690,19 +1487,17 @@ async function printLabelHTML(html, printerName, widthMm, heightMm) {
             }
           }
         );
-      }, 1000); // Wait 1s for base64 images to fully render
+      }, 1200); // Wait longer for images/barcodes to render
     });
 
     printWin.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
       console.error('[Label Print] Failed to load HTML:', errorDesc);
       try { printWin.close(); } catch { /* ignore */ }
-      try { fs.unlinkSync(tmpFile); } catch {}
       reject(new Error(`Failed to load label HTML: ${errorDesc}`));
     });
 
     setTimeout(() => {
       try { printWin.close(); } catch { /* ignore */ }
-      try { fs.unlinkSync(tmpFile); } catch {}
       reject(new Error('Label print timeout'));
     }, 15000);
   });
@@ -2245,7 +2040,7 @@ async function testPrintLabel() {
     console.log(`[Test Label] Printing to: ${printerName}`);
     console.log(`[Test Label] Available printers: ${printerList}`);
 
-    const result = await printLabelGDI(testLabel, printerName, 51, 25);
+    const result = await printLabelGDI(testLabel, printerName, 37.3, 28.6);
     
     dialog.showMessageBox(mainWindow, {
       type: 'info',
@@ -2285,26 +2080,6 @@ function showAbout() {
 
 // ─── App Lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
-  // ALWAYS clear ALL web cache on startup to ensure latest UI loads
-  const { session } = require('electron');
-  const currentVersion = require('../package.json').version;
-  const lastVersion = store.get('lastAppVersion', '');
-  console.log(`[App] v${currentVersion} starting (last: ${lastVersion}). Clearing ALL cache...`);
-  try {
-    // Clear HTTP cache
-    await session.defaultSession.clearCache();
-    // Clear all storage types: localStorage, sessionStorage, indexeddb, websql, serviceworkers, cachestorage
-    await session.defaultSession.clearStorageData({
-      storages: ['appcache', 'filesystem', 'indexdb', 'localstorage', 'shadercache', 'websql', 'serviceworkers', 'cachestorage']
-    });
-    // Also clear code caches
-    await session.defaultSession.clearCodeCaches({});
-    console.log('[App] ALL cache cleared successfully');
-  } catch (e) {
-    console.log('[App] Cache clear error (non-fatal):', e.message);
-  }
-  store.set('lastAppVersion', currentVersion);
-
   // Initialize local database
   await initDatabase();
 

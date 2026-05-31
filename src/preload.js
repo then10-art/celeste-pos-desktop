@@ -94,6 +94,8 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
 
   printLabelsOffline: (labels, printerName, widthMm, heightMm) =>
     ipcRenderer.invoke('print-labels-offline', { labels, printerName, widthMm, heightMm }),
+  printLabelsBitmap: (htmlLabels, printerName, widthMm, heightMm) =>
+    ipcRenderer.invoke('print-labels-bitmap', { htmlLabels, printerName, widthMm, heightMm }),
 
   saveLabelPrinter: (printerName) =>
     ipcRenderer.invoke('save-label-printer', printerName),
