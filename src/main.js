@@ -1914,6 +1914,44 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
   return await dialog.showOpenDialog(mainWindow, options);
 });
 
+// ─── IPC: Webapp Cache Management ────────────────────────────────────────────
+/**
+ * Clear the webapp cache directory to recover from stale asset errors.
+ * This is called when the error boundary detects a SyntaxError from missing/stale JS chunks.
+ */
+ipcMain.handle('clear-webapp-cache', async () => {
+  try {
+    const { getUpdatableWebappDir } = require('./webapp-updater');
+    const fs = require('fs');
+    const path = require('path');
+    
+    const cacheDir = getUpdatableWebappDir();
+    if (fs.existsSync(cacheDir)) {
+      // Recursively delete the entire cache directory
+      const deleteRecursive = (dir) => {
+        if (fs.existsSync(dir)) {
+          fs.readdirSync(dir).forEach((file) => {
+            const filePath = path.join(dir, file);
+            if (fs.lstatSync(filePath).isDirectory()) {
+              deleteRecursive(filePath);
+            } else {
+              fs.unlinkSync(filePath);
+            }
+          });
+          fs.rmdirSync(dir);
+        }
+      };
+      deleteRecursive(cacheDir);
+      console.log('[IPC] Webapp cache cleared:', cacheDir);
+      return { success: true, message: 'Cache cleared' };
+    }
+    return { success: true, message: 'Cache directory not found' };
+  } catch (err) {
+    console.error('[IPC] Failed to clear webapp cache:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
 // ─── IPC: BarTender Integration ──────────────────────────────────────────────
 ipcMain.handle('bartender-print', async (event, { labels, templatePath, copies }) => {
   const { execFile } = require('child_process');

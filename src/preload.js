@@ -152,6 +152,10 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   showOpenDialog: (options) =>
     ipcRenderer.invoke('show-open-dialog', options),
 
+  // ── Webapp Cache Management ───────────────────────────────────────────────
+  clearWebappCache: () =>
+    ipcRenderer.invoke('clear-webapp-cache'),
+
   // ── BarTender Integration ─────────────────────────────────────────────────
   bartenderPrint: (labels, templatePath, copies) =>
     ipcRenderer.invoke('bartender-print', { labels, templatePath, copies }),
