@@ -11,7 +11,7 @@
 
 const { logPrintStart, logConversion, logPrintResult, logPrinterDetection } = require('./printLogger');
 
-let printerConfig = { type: 'usb', address: '', printerName: '' };
+let printerConfig = { type: 'usb', address: '', printerName: '', usbPort: '' };
 let mainWindowRef = null;
 
 // ─── Known receipt printer name patterns ─────────────────────────────────────
@@ -156,6 +156,15 @@ async function getAvailablePrinters() {
         const isExcluded = EXCLUDED_PATTERNS.some(rx => rx.test(p.name));
         const isReceiptDedicated = RECEIPT_PRINTER_PATTERNS.some(rx => rx.test(p.name));
         const isEpsonInkjet = EPSON_INKJET_PATTERNS.some(rx => rx.test(p.name));
+        
+        // Extract USB port if available from printer properties
+        let usbPort = null;
+        if (p.options && p.options['printer-make-and-model']) {
+          const model = p.options['printer-make-and-model'];
+          const portMatch = model.match(/USB([0-9]{3})/i);
+          if (portMatch) usbPort = `USB${portMatch[1]}`;
+        }
+        
         result.push({
           name: p.name,
           displayName: p.displayName || p.name,
@@ -164,6 +173,7 @@ async function getAvailablePrinters() {
           isReceipt: !isExcluded && (isReceiptDedicated || isEpsonInkjet),
           isInkjet: isEpsonInkjet && !isReceiptDedicated,
           type: 'system',
+          usbPort: usbPort,
         });
       }
     } catch { /* ignore */ }

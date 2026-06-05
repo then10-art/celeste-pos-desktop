@@ -57,7 +57,7 @@ const store = new Store({
     isMaximized: false,
     autoLaunch: false,
     offlineMode: false,
-    printerConfig: { type: 'usb', address: '', printerName: '' },
+    printerConfig: { type: 'usb', address: '', printerName: '', usbPort: '' },
     cashDrawerConfig: { type: 'printer' },
   }
 });
