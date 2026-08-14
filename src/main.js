@@ -8,13 +8,18 @@ const { app, BrowserWindow, Menu, Tray, ipcMain, dialog, shell, nativeImage } = 
 const path = require('path');
 const Store = require('electron-store');
 // Use electron-updater for generic provider (latest.yml) support
-// electron-updater reads publish config from package.json automatically
+// Explicitly configure the update feed URL to avoid "Unsupported provider: undefined" errors
 let autoUpdater = null;
 let updaterAvailable = false;
 try {
   autoUpdater = require('electron-updater').autoUpdater;
   autoUpdater.autoDownload = false; // Ask user before downloading
   autoUpdater.logger = null; // Suppress verbose logs in production
+  // Explicitly set feed URL (fixes "Unsupported provider: undefined" on some installs)
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: 'https://celestepos.live/api/updates/'
+  });
   // Use user's temp directory to avoid EPERM on non-admin accounts
   const os = require('os');
   const pathModule = require('path');
