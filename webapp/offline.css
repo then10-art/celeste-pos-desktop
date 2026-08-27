@@ -1,0 +1,216 @@
+:root {
+  color-scheme: light;
+  --navy: #0b2341;
+  --blue: #1769e0;
+  --blue-dark: #0d4fb3;
+  --sky: #eaf3ff;
+  --border: #d8e1ed;
+  --muted: #607086;
+  --danger: #b42318;
+  --danger-bg: #fff0ee;
+  --success: #067647;
+  --surface: #ffffff;
+  --page: #f3f6fa;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Arial, sans-serif;
+  color: var(--navy);
+  background: var(--page);
+}
+
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+
+.lock-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, #e8f2ff 0, #f7f9fc 48%, #edf1f6 100%);
+}
+
+.lock-card {
+  width: min(420px, 100%);
+  padding: 34px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 20px 50px rgba(11, 35, 65, 0.12);
+}
+
+.brand-mark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: #fff;
+  background: linear-gradient(145deg, #0c2c55, #1d79ed);
+  font-size: 30px;
+}
+
+h1, h2, p { margin-top: 0; }
+.lock-card h1 { margin: 18px 0 8px; }
+.lock-card p { color: var(--muted); line-height: 1.45; }
+
+label {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+input, select {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid #bdcad9;
+  border-radius: 9px;
+  color: var(--navy);
+  background: #fff;
+  outline: none;
+}
+
+input:focus, select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(23, 105, 224, 0.14);
+}
+
+.primary, .secondary {
+  min-height: 42px;
+  padding: 9px 15px;
+  border-radius: 9px;
+  font-weight: 700;
+}
+
+.primary {
+  border: 1px solid var(--blue);
+  color: #fff;
+  background: var(--blue);
+}
+.primary:hover { background: var(--blue-dark); }
+
+.secondary {
+  border: 1px solid #b8c6d8;
+  color: var(--navy);
+  background: #fff;
+}
+.lock-card .primary { width: 100%; margin-top: 18px; }
+
+.error { min-height: 18px; margin: 10px 0 0; color: var(--danger) !important; font-size: 13px; }
+
+.app { min-height: 100vh; }
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  min-height: 84px;
+  padding: 14px 22px;
+  color: #fff;
+  background: linear-gradient(115deg, #071b35, #103b70);
+  box-shadow: 0 4px 14px rgba(7, 27, 53, 0.2);
+}
+.topbar h1 { margin: 2px 0 0; font-size: 24px; }
+.eyebrow { font-size: 11px; font-weight: 800; letter-spacing: .12em; color: #9bc9ff; }
+.status-cluster { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+.pill {
+  padding: 6px 10px;
+  border: 1px solid rgba(255,255,255,.25);
+  border-radius: 999px;
+  color: #eaf3ff;
+  background: rgba(255,255,255,.08);
+  font-size: 12px;
+  font-weight: 700;
+}
+.pill.offline { color: #ffcfca; border-color: rgba(255, 116, 103, .5); }
+.pill.online { color: #8ff0c5; border-color: rgba(66, 211, 146, .5); }
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(390px, .8fr);
+  gap: 16px;
+  padding: 16px;
+}
+
+.catalog-panel, .sale-panel {
+  min-height: calc(100vh - 116px);
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgba(11, 35, 65, .05);
+}
+
+.section-heading { display: flex; justify-content: space-between; gap: 15px; align-items: flex-start; }
+.section-heading h2 { margin-bottom: 4px; font-size: 20px; }
+.section-heading p { margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+.section-heading.compact { align-items: center; }
+.text-button { border: 0; color: var(--danger); background: transparent; font-weight: 700; }
+
+.search-row { display: grid; grid-template-columns: 1fr auto; gap: 9px; margin: 10px 0 16px; }
+.product-list, .cart-list { display: grid; gap: 8px; }
+.product-row, .cart-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+}
+.product-row { grid-template-columns: 1fr auto auto; }
+.product-row:hover { border-color: #8db7ed; background: #fafdff; }
+.product-name { font-weight: 750; }
+.product-meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.price { font-weight: 800; white-space: nowrap; }
+.add-button { width: 38px; height: 34px; border: 0; border-radius: 8px; color: #fff; background: var(--blue); font-size: 20px; }
+
+.empty-state {
+  padding: 25px;
+  border: 1px dashed #bdcad9;
+  border-radius: 10px;
+  color: var(--muted);
+  text-align: center;
+  background: #f9fbfd;
+}
+
+.cart-list { max-height: 34vh; margin-top: 12px; overflow: auto; }
+.cart-row { grid-template-columns: 1fr auto; }
+.cart-actions { display: flex; align-items: center; gap: 5px; }
+.qty-button { width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 7px; background: #fff; font-weight: 800; }
+.qty { min-width: 38px; text-align: center; font-weight: 750; }
+.remove-button { margin-left: 4px; border: 0; color: var(--danger); background: transparent; font-size: 18px; }
+
+.totals { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.totals > div, .change-row { display: flex; justify-content: space-between; padding: 5px 0; }
+.grand-total { margin-top: 6px; padding-top: 10px !important; border-top: 1px solid var(--border); font-size: 24px; }
+
+.payment-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.change-row { margin: 8px 0 2px; color: var(--success); font-size: 18px; }
+.complete { width: 100%; min-height: 52px; margin-top: 10px; font-size: 16px; }
+.full { width: 100%; margin-top: 8px; }
+
+.toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 20;
+  max-width: 430px;
+  padding: 15px 18px;
+  border-radius: 12px;
+  color: #fff;
+  background: var(--success);
+  box-shadow: 0 12px 30px rgba(0,0,0,.22);
+  font-weight: 700;
+}
+
+@media (max-width: 920px) {
+  .workspace { grid-template-columns: 1fr; }
+  .catalog-panel, .sale-panel { min-height: auto; }
+  .topbar { align-items: flex-start; }
+}

@@ -14,7 +14,7 @@ const path = require('path');
 const { URL } = require('url');
 const zlib = require('zlib');
 
-const CLOUD_URL = 'https://celestepos.live';
+const CLOUD_URL = (process.env.CELESTE_CLOUD_URL || 'https://celestepos.live').replace(/\/$/, '');
 
 // MIME types for static file serving
 const MIME_TYPES = {

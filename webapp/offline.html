@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Celeste POS — Modo Local</title>
+  <link rel="stylesheet" href="/offline.css" />
+</head>
+<body>
+  <div id="lockScreen" class="lock-screen">
+    <form id="pinForm" class="lock-card">
+      <div class="brand-mark">✦</div>
+      <h1>Celeste POS Local</h1>
+      <p id="pinInstructions">Ingrese el PIN local para continuar.</p>
+      <label for="pinInput">PIN local</label>
+      <input id="pinInput" inputmode="numeric" pattern="[0-9]*" maxlength="12" autocomplete="off" required />
+      <label id="confirmPinLabel" for="confirmPinInput" hidden>Confirmar PIN</label>
+      <input id="confirmPinInput" inputmode="numeric" pattern="[0-9]*" maxlength="12" autocomplete="off" hidden />
+      <button type="submit" class="primary">Continuar</button>
+      <p id="pinError" class="error" role="alert"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">MODO LOCAL · SIN DEPENDENCIA DEL SITIO WEB</div>
+        <h1 id="tenantName">Celeste POS</h1>
+      </div>
+      <div class="status-cluster">
+        <span id="networkStatus" class="pill offline">Servidor no disponible</span>
+        <span id="queueStatus" class="pill">0 pendientes</span>
+        <button id="onlineButton" class="secondary">Volver en línea</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="catalog-panel">
+        <div class="section-heading">
+          <div>
+            <h2>Productos locales</h2>
+            <p id="cacheStatus">Cargando caché…</p>
+          </div>
+        </div>
+
+        <form id="searchForm" class="search-row">
+          <input id="searchInput" type="search" placeholder="Escanee un código o busque un producto" autocomplete="off" />
+          <button class="primary" type="submit">Buscar</button>
+        </form>
+
+        <div id="catalogMessage" class="empty-state">Ingrese un nombre o código de barras.</div>
+        <div id="searchResults" class="product-list"></div>
+      </section>
+
+      <section class="sale-panel">
+        <div class="section-heading compact">
+          <div>
+            <h2>Venta local</h2>
+            <p>Se guarda primero en esta computadora y se sincroniza después.</p>
+          </div>
+          <button id="clearCartButton" class="text-button" type="button">Vaciar</button>
+        </div>
+
+        <label for="cashierName">Cajero</label>
+        <input id="cashierName" maxlength="200" placeholder="Nombre del cajero" autocomplete="off" />
+
+        <div id="cartEmpty" class="empty-state">La venta está vacía.</div>
+        <div id="cartItems" class="cart-list"></div>
+
+        <div class="totals">
+          <div><span>Subtotal</span><strong id="subtotalValue">RD$ 0.00</strong></div>
+          <div><span>ITBIS</span><strong id="taxValue">RD$ 0.00</strong></div>
+          <div class="grand-total"><span>Total</span><strong id="totalValue">RD$ 0.00</strong></div>
+        </div>
+
+        <div class="payment-grid">
+          <div>
+            <label for="paymentMethod">Forma de pago</label>
+            <select id="paymentMethod">
+              <option value="cash_dop">Efectivo RD$</option>
+              <option value="card">Tarjeta — terminal externo</option>
+              <option value="transfer">Transferencia</option>
+              <option value="check">Cheque</option>
+            </select>
+          </div>
+          <div>
+            <label for="amountTendered">Monto recibido</label>
+            <input id="amountTendered" inputmode="decimal" placeholder="0.00" />
+          </div>
+        </div>
+        <label for="paymentReference">Referencia (opcional)</label>
+        <input id="paymentReference" maxlength="200" placeholder="Número de autorización, transferencia o cheque" />
+
+        <div class="change-row"><span>Cambio</span><strong id="changeValue">RD$ 0.00</strong></div>
+        <button id="completeSaleButton" class="primary complete" type="button">Guardar venta local e imprimir</button>
+        <button id="reprintButton" class="secondary full" type="button" hidden>Reimprimir último recibo</button>
+        <p id="saleError" class="error" role="alert"></p>
+      </section>
+    </main>
+  </div>
+
+  <div id="successToast" class="toast" hidden></div>
+  <script src="/offline.js"></script>
+</body>
+</html>

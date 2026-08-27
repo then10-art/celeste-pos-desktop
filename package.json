@@ -1,6 +1,6 @@
 {
   "name": "celeste-pos-desktop",
-  "version": "2.8.3",
+  "version": "2.9.0",
   "description": "Celeste POS - Desktop Application for Windows",
   "main": "src/main.js",
   "author": "Celeste POS",
@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "test:offline": "node test/run-offline-tests.js",
     "build": "electron-builder --win --x64",
     "build:x64": "electron-builder --win --x64",
     "build:mac": "electron-builder --mac --x64",

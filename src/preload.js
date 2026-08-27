@@ -130,6 +130,45 @@ contextBridge.exposeInMainWorld('CelesteDesktop', {
   queueOfflineTransaction: (transaction) =>
     ipcRenderer.invoke('queue-offline-transaction', transaction),
 
+  getOfflineBootstrap: () =>
+    ipcRenderer.invoke('get-offline-bootstrap'),
+
+  configureOfflinePin: (pin) =>
+    ipcRenderer.invoke('configure-offline-pin', pin),
+
+  verifyOfflinePin: (pin) =>
+    ipcRenderer.invoke('verify-offline-pin', pin),
+
+  cacheOfflineProducts: (payload) =>
+    ipcRenderer.invoke('cache-offline-products', payload),
+
+  cacheOfflineContext: (payload) =>
+    ipcRenderer.invoke('cache-offline-context', payload),
+
+  getOfflineDraft: () =>
+    ipcRenderer.invoke('get-offline-draft'),
+
+  saveOfflineDraft: (payload) =>
+    ipcRenderer.invoke('save-offline-draft', payload),
+
+  clearOfflineDraft: () =>
+    ipcRenderer.invoke('clear-offline-draft'),
+
+  searchOfflineProducts: (query, limit) =>
+    ipcRenderer.invoke('search-offline-products', { query, limit }),
+
+  lookupOfflineProduct: (barcode) =>
+    ipcRenderer.invoke('lookup-offline-product', barcode),
+
+  queueOfflineSale: (sale) =>
+    ipcRenderer.invoke('queue-offline-sale', sale),
+
+  openOfflinePos: () =>
+    ipcRenderer.invoke('open-offline-pos'),
+
+  openOnlinePos: () =>
+    ipcRenderer.invoke('open-online-pos'),
+
   retryFailedItems: () =>
     ipcRenderer.invoke('retry-failed-items'),
 

@@ -17,7 +17,7 @@ const path = require('path');
 const https = require('https');
 const { app } = require('electron');
 
-const CLOUD_URL = 'https://celestepos.live';
+const CLOUD_URL = (process.env.CELESTE_CLOUD_URL || 'https://celestepos.live').replace(/\/$/, '');
 const WEBAPP_VERSION_ENDPOINT = `${CLOUD_URL}/api/webapp-version`;
 
 /**

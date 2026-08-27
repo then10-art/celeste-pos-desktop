@@ -9,14 +9,10 @@
   "orientation": "any",
   "icons": [
     {
-      "src": "https://files.manuscdn.com/user_upload_by_module/session_file/310519663356465781/TdzryqJjfwKPvHpt.png",
-      "sizes": "192x192",
-      "type": "image/png"
-    },
-    {
-      "src": "https://files.manuscdn.com/user_upload_by_module/session_file/310519663356465781/feQJbvLgBTAWOAfi.png",
-      "sizes": "512x512",
-      "type": "image/png"
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
     }
   ]
 }

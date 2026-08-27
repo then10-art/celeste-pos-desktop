@@ -6,6 +6,8 @@
 
 const { app, BrowserWindow, Menu, Tray, ipcMain, dialog, shell, nativeImage } = require('electron');
 const path = require('path');
+const crypto = require('crypto');
+const os = require('os');
 const Store = require('electron-store');
 // Use electron-updater for generic provider (latest.yml) support
 // Explicitly configure the update feed URL to avoid "Unsupported provider: undefined" errors
@@ -18,7 +20,7 @@ try {
   // Explicitly set feed URL (fixes "Unsupported provider: undefined" on some installs)
   autoUpdater.setFeedURL({
     provider: 'generic',
-    url: 'https://celestepos.live/api/updates/'
+    url: `${(process.env.CELESTE_CLOUD_URL || 'https://celestepos.live').replace(/\/$/, '')}/api/updates/`
   });
   // Use user's temp directory to avoid EPERM on non-admin accounts
   const os = require('os');
@@ -49,23 +51,32 @@ app.commandLine.appendSwitch('disable-lcd-text', 'false');
 
 // ─── App Configuration ───────────────────────────────────────────────────────
 const isDev = process.argv.includes('--dev');
-const CLOUD_URL = 'https://celestepos.live';
-const UPDATE_SERVER = 'https://celestepos.live/api/updates/';
+const CLOUD_URL = (process.env.CELESTE_CLOUD_URL || 'https://celestepos.live').replace(/\/$/, '');
+const UPDATE_SERVER = `${CLOUD_URL}/api/updates/`;
 
 // ─── Persistent Settings Store ───────────────────────────────────────────────
 const store = new Store({
   defaults: {
     tenantSlug: '',
     tenantName: '',
+    tenantId: null,
     setupComplete: false,
     windowBounds: { width: 1280, height: 800 },
     isMaximized: false,
     autoLaunch: false,
     offlineMode: false,
+    offlinePinHash: '',
+    offlinePinSalt: '',
+    offlineContext: null,
+    offlineDraftSale: null,
     printerConfig: { type: 'usb', address: '', printerName: '', usbPort: '' },
     cashDrawerConfig: { type: 'printer' },
   }
 });
+
+if (!store.get('machineId')) {
+  store.set('machineId', `${os.hostname()}-${crypto.randomBytes(4).toString('hex')}`);
+}
 
 // ─── Global State ─────────────────────────────────────────────────────────────
 let mainWindow = null;
@@ -80,7 +91,20 @@ let retryTimerId = null; // Timer for scheduled retries
 let userTriggeredUpdateCheck = false;
 
 // ─── Sync & Offline Modules ───────────────────────────────────────────────────
-const { initDatabase, getOfflineQueue, clearSyncedItems, recordSyncFailure, getRetryableItems, getQueueStats, retryFailedItems, purgeOldSyncedItems } = require('./database');
+const {
+  initDatabase,
+  clearSyncedItems,
+  recordSyncFailure,
+  getRetryableItems,
+  getQueueStats,
+  retryFailedItems,
+  purgeOldSyncedItems,
+  queueTransaction,
+  cacheProducts,
+  lookupProductByBarcode,
+  searchCachedProducts,
+  getProductCacheStats,
+} = require('./database');
 const { syncWithCloud, checkCloudHealth } = require('./sync');
 const { setupHardware, printReceipt, openCashDrawer, getConnectedDevices, getPrinterStatus, getAvailablePrinters, sendRawToPrinter, getAutoDetectedPrinterName } = require('./hardware');
 const { printReceiptGDI, printLabelGDI, printLabelsGDI } = require('./hardware/offlinePrinter');
@@ -213,6 +237,7 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
       // Save the tenant code — do NOT mark setupComplete yet (printer step comes next)
       store.set('tenantSlug', slug);
       store.set('tenantName', tenantName);
+      if (tenantData.id != null) store.set('tenantId', Number(tenantData.id));
       // setupComplete will be set by setup-finish after printer config
 
       console.log(`[Setup] Tenant validated: ${slug} (${tenantName}) — proceeding to printer setup`);
@@ -237,6 +262,7 @@ ipcMain.handle('setup-validate-tenant', async (event, code) => {
     if (offlineResponse === 0) {
       store.set('tenantSlug', slug);
       store.set('tenantName', slug.toUpperCase());
+      store.set('tenantId', null);
       // setupComplete will be set by setup-finish after printer config
 
       console.log(`[Setup] Tenant validated (offline): ${slug} — proceeding to printer setup`);
@@ -401,6 +427,11 @@ async function launchMainApp() {
     console.error('[App] Failed to start local server:', err.message);
   }
 
+  // Decide the initial mode using a validated JSON health response. A branded
+  // billing/error page returning HTTP 200 must never be treated as online.
+  isOnline = await checkCloudHealth(5000);
+  store.set('offlineMode', !isOnline);
+
   // Create main window
   createWindow();
 
@@ -502,15 +533,21 @@ function createWindow() {
   // Remove default menu bar
   Menu.setApplicationMenu(buildAppMenu());
 
-  // Load the web app — use local server if available, otherwise cloud
+  // The UI is always served locally when bundled. During an outage we keep the
+  // normal React POS route and switch its data source to native SQLite. This
+  // preserves the cashier's familiar interface instead of opening a separate
+  // emergency page.
   const tenantSlug = store.get('tenantSlug');
   let url;
-  if (localServerPort) {
+  if (localServerPort && store.get('offlineMode')) {
+    url = `http://127.0.0.1:${localServerPort}/pos?desktopOffline=1`;
+    console.log(`[App] Cloud unavailable — loading regular POS with local data → ${url}`);
+  } else if (localServerPort) {
     url = `http://127.0.0.1:${localServerPort}/t/${tenantSlug}`;
     console.log(`[App] Loading tenant locally: ${tenantSlug} → ${url}`);
   } else {
     url = `${CLOUD_URL}/t/${tenantSlug}`;
-    console.log(`[App] Loading tenant from cloud: ${tenantSlug} → ${url}`);
+    console.log(`[App] No bundled webapp available — loading cloud tenant: ${tenantSlug}`);
   }
   // Add cache-busting timestamp and disable caching headers
   const cacheBustUrl = `${url}${url.includes('?') ? '&' : '?'}_cb=${Date.now()}`;
@@ -592,6 +629,25 @@ function createWindow() {
   return mainWindow;
 }
 
+function loadOfflinePos() {
+  if (!mainWindow || !localServerPort) return false;
+  store.set('offlineMode', true);
+  mainWindow.loadURL(`http://127.0.0.1:${localServerPort}/pos?desktopOffline=1&_cb=${Date.now()}`);
+  return true;
+}
+
+async function loadOnlinePos() {
+  if (!mainWindow) return { success: false, reason: 'window_unavailable' };
+  const healthy = await checkCloudHealth(5000);
+  isOnline = healthy;
+  if (!healthy) return { success: false, reason: 'cloud_unavailable' };
+
+  store.set('offlineMode', false);
+  const base = localServerPort ? `http://127.0.0.1:${localServerPort}` : CLOUD_URL;
+  await mainWindow.loadURL(`${base}/pos?_cb=${Date.now()}`);
+  return { success: true };
+}
+
 // ─── System Tray ─────────────────────────────────────────────────────────────
 function createTray() {
   const iconPath = path.join(__dirname, '../assets/tray-icon.ico');
@@ -615,6 +671,28 @@ function createTray() {
     {
       label: `Negocio: ${store.get('tenantSlug', '').toUpperCase()}`,
       enabled: false,
+    },
+    { type: 'separator' },
+    {
+      label: 'Abrir POS Local (sin internet)',
+      click: () => {
+        mainWindow.show();
+        loadOfflinePos();
+      }
+    },
+    {
+      label: 'Volver al sistema en línea',
+      click: async () => {
+        mainWindow.show();
+        const result = await loadOnlinePos();
+        if (!result.success) {
+          dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            title: 'Servidor no disponible',
+            message: 'El sistema en línea todavía no responde correctamente. El POS local seguirá disponible.',
+          });
+        }
+      }
     },
     { type: 'separator' },
     {
@@ -683,6 +761,25 @@ function buildAppMenu() {
     {
       label: 'Archivo',
       submenu: [
+        {
+          label: 'Abrir POS Local (sin internet)',
+          accelerator: 'CmdOrCtrl+Shift+L',
+          click: () => loadOfflinePos()
+        },
+        {
+          label: 'Volver al Sistema en Línea',
+          click: async () => {
+            const result = await loadOnlinePos();
+            if (!result.success) {
+              dialog.showMessageBox(mainWindow, {
+                type: 'warning',
+                title: 'Servidor no disponible',
+                message: 'El sistema en línea todavía no responde correctamente. El POS local seguirá disponible.',
+              });
+            }
+          }
+        },
+        { type: 'separator' },
         {
           label: 'Recargar',
           accelerator: 'F5',
@@ -823,6 +920,10 @@ function buildAppMenu() {
 function injectOfflineIndicator() {
   const script = `
     (function() {
+      // The regular local POS renders its own integrated status strip. Keep
+      // this legacy injected banner for online pages only so it cannot shift
+      // or cover the cashier interface while working locally.
+      if (new URLSearchParams(window.location.search).get('desktopOffline') === '1') return;
       // Create offline banner
       const banner = document.createElement('div');
       banner.id = 'celeste-offline-banner';
@@ -1011,6 +1112,19 @@ function injectDesktopBridge() {
           getQueuedCount: () => ipcRenderer.invoke('get-queued-count'),
           getQueueStats: () => ipcRenderer.invoke('get-queue-stats'),
           queueOfflineTransaction: (tx) => ipcRenderer.invoke('queue-offline-transaction', tx),
+          getOfflineBootstrap: () => ipcRenderer.invoke('get-offline-bootstrap'),
+          configureOfflinePin: (pin) => ipcRenderer.invoke('configure-offline-pin', pin),
+          verifyOfflinePin: (pin) => ipcRenderer.invoke('verify-offline-pin', pin),
+          cacheOfflineProducts: (payload) => ipcRenderer.invoke('cache-offline-products', payload),
+          cacheOfflineContext: (payload) => ipcRenderer.invoke('cache-offline-context', payload),
+          getOfflineDraft: () => ipcRenderer.invoke('get-offline-draft'),
+          saveOfflineDraft: (payload) => ipcRenderer.invoke('save-offline-draft', payload),
+          clearOfflineDraft: () => ipcRenderer.invoke('clear-offline-draft'),
+          searchOfflineProducts: (query, limit) => ipcRenderer.invoke('search-offline-products', { query, limit }),
+          lookupOfflineProduct: (barcode) => ipcRenderer.invoke('lookup-offline-product', barcode),
+          queueOfflineSale: (sale) => ipcRenderer.invoke('queue-offline-sale', sale),
+          openOfflinePos: () => ipcRenderer.invoke('open-offline-pos'),
+          openOnlinePos: () => ipcRenderer.invoke('open-online-pos'),
           retryFailedItems: () => ipcRenderer.invoke('retry-failed-items'),
           forceSync: () => ipcRenderer.invoke('force-sync'),
           onSyncComplete: (callback) => {
@@ -1064,13 +1178,13 @@ function startConnectivityMonitor() {
   async function checkConnectivity() {
     try {
       const healthy = await checkCloudHealth(5000);
-      const wasOffline = !isOnline;
-      isOnline = healthy;
+      const wasOnline = isOnline;
 
       if (healthy) {
+        isOnline = true;
         consecutiveFailures = 0;
 
-        if (wasOffline) {
+        if (!wasOnline) {
           console.log('[Connectivity] Connection restored!');
           mainWindow?.webContents.executeJavaScript(
             "window.dispatchEvent(new Event('celeste-online'));"
@@ -1078,6 +1192,16 @@ function startConnectivityMonitor() {
           updateOfflineBanner();
           // Trigger sync immediately when coming back online
           syncOfflineQueue();
+        }
+      } else {
+        consecutiveFailures++;
+        isOnline = false;
+        if (wasOnline) {
+          console.log('[Connectivity] Validated cloud health check failed');
+          mainWindow?.webContents.executeJavaScript(
+            "window.dispatchEvent(new Event('celeste-offline'));"
+          ).catch(() => {});
+          updateOfflineBanner();
         }
       }
     } catch {
@@ -1158,6 +1282,19 @@ function updateOfflineBanner() {
 }
 
 // ─── Offline Queue Sync (Resilient) ──────────────────────────────────────────
+async function getLocalSessionCookieHeader() {
+  if (!mainWindow || !localServerPort) return '';
+  try {
+    const cookies = await mainWindow.webContents.session.cookies.get({
+      url: `http://127.0.0.1:${localServerPort}`,
+    });
+    return cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+  } catch (err) {
+    console.warn('[Sync] Could not read the local authenticated session:', err.message);
+    return '';
+  }
+}
+
 async function syncOfflineQueue() {
   // Prevent concurrent sync runs
   if (isSyncing) {
@@ -1174,6 +1311,13 @@ async function syncOfflineQueue() {
       return;
     }
 
+    const authCookie = await getLocalSessionCookieHeader();
+    if (!authCookie) {
+      console.warn('[Sync] Pending sales preserved; sign in online before synchronization can continue');
+      isSyncing = false;
+      return;
+    }
+
     console.log(`[Sync] Syncing ${queue.length} offline transactions...`);
 
     // Notify renderer that sync is starting
@@ -1182,6 +1326,7 @@ async function syncOfflineQueue() {
     ).catch(() => {});
 
     const result = await syncWithCloud(queue, {
+      authCookie,
       onItemSynced: (id) => {
         console.log(`[Sync] Item ${id} synced successfully`);
       },
@@ -1887,8 +2032,224 @@ ipcMain.handle('get-queue-stats', () => {
   return getQueueStats();
 });
 
+ipcMain.handle('get-offline-bootstrap', () => {
+  const tenantId = Number(store.get('tenantId')) || null;
+  return {
+    appVersion: app.getVersion(),
+    tenantId,
+    tenantSlug: store.get('tenantSlug') || '',
+    tenantName: store.get('tenantName') || store.get('tenantSlug') || 'Celeste POS',
+    machineId: store.get('machineId'),
+    machineName: os.hostname(),
+    isOnline,
+    queue: getQueueStats(),
+    products: tenantId ? getProductCacheStats(tenantId) : { count: 0, updatedAt: null },
+    offlinePinConfigured: Boolean(store.get('offlinePinHash') && store.get('offlinePinSalt')),
+    context: store.get('offlineContext') || null,
+  };
+});
+
+ipcMain.handle('cache-offline-context', (event, payload) => {
+  if (!payload || typeof payload !== 'object') return { success: false, error: 'invalid_context' };
+  const user = payload.user && typeof payload.user === 'object' ? {
+    id: Number(payload.user.id) || null,
+    name: String(payload.user.name || 'Cajero').slice(0, 200),
+    role: String(payload.user.role || 'cashier').slice(0, 40),
+    tenantId: Number(payload.user.tenantId) || null,
+  } : null;
+  const settings = payload.settings && typeof payload.settings === 'object'
+    ? Object.fromEntries(Object.entries(payload.settings).slice(0, 100).map(([key, value]) => [
+        String(key).slice(0, 100), String(value ?? '').slice(0, 2000),
+      ]))
+    : {};
+  const context = {
+    user,
+    register: payload.register && typeof payload.register === 'object' ? {
+      id: Number(payload.register.id) || null,
+      registerNumber: Number(payload.register.registerNumber) || null,
+      name: String(payload.register.name || '').slice(0, 200),
+    } : null,
+    shift: payload.shift && typeof payload.shift === 'object' ? {
+      id: Number(payload.shift.id) || null,
+      openingCash: Number(payload.shift.openingCash) || 0,
+      openedAt: payload.shift.openedAt ? String(payload.shift.openedAt).slice(0, 80) : null,
+    } : null,
+    settings,
+    usdRate: Number(payload.usdRate) || 58.5,
+    cachedAt: new Date().toISOString(),
+  };
+  store.set('offlineContext', context);
+  if (user?.tenantId) store.set('tenantId', user.tenantId);
+  return { success: true };
+});
+
+ipcMain.handle('get-offline-draft', () => store.get('offlineDraftSale') || null);
+
+ipcMain.handle('save-offline-draft', (event, payload) => {
+  if (!payload || typeof payload !== 'object') return { success: false, error: 'invalid_draft' };
+  const serialized = JSON.stringify(payload);
+  if (serialized.length > 2_000_000) return { success: false, error: 'draft_too_large' };
+  store.set('offlineDraftSale', payload);
+  return { success: true };
+});
+
+ipcMain.handle('clear-offline-draft', () => {
+  store.set('offlineDraftSale', null);
+  return { success: true };
+});
+
+function hashOfflinePin(pin, salt) {
+  return crypto.scryptSync(pin, salt, 32).toString('hex');
+}
+
+ipcMain.handle('configure-offline-pin', (event, rawPin) => {
+  const pin = String(rawPin || '').trim();
+  if (!/^\d{4,12}$/.test(pin)) return { success: false, error: 'pin_format' };
+  const existingSalt = store.get('offlinePinSalt');
+  const existingHash = store.get('offlinePinHash');
+  if (existingSalt && existingHash) {
+    const actualBuffer = Buffer.from(hashOfflinePin(pin, existingSalt), 'hex');
+    const expectedBuffer = Buffer.from(existingHash, 'hex');
+    const success = actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+    return { success, error: success ? undefined : 'pin_already_configured' };
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashOfflinePin(pin, salt);
+  store.set({ offlinePinSalt: salt, offlinePinHash: hash });
+  return { success: true };
+});
+
+ipcMain.handle('verify-offline-pin', (event, rawPin) => {
+  const pin = String(rawPin || '').trim();
+  const salt = store.get('offlinePinSalt');
+  const expected = store.get('offlinePinHash');
+  if (!salt || !expected || !/^\d{4,12}$/.test(pin)) return { success: false };
+  const actual = hashOfflinePin(pin, salt);
+  const actualBuffer = Buffer.from(actual, 'hex');
+  const expectedBuffer = Buffer.from(expected, 'hex');
+  const success = actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+  return { success };
+});
+
+ipcMain.handle('cache-offline-products', (event, payload) => {
+  const tenantId = Number(payload?.tenantId);
+  const products = Array.isArray(payload?.products) ? payload.products : [];
+  if (!Number.isInteger(tenantId) || tenantId <= 0) {
+    return { success: false, error: 'tenant_id_required' };
+  }
+  if (products.length === 0 || products.length > 100000) {
+    return { success: false, error: 'invalid_product_batch' };
+  }
+  const count = cacheProducts(tenantId, products);
+  if (count > 0) {
+    store.set('tenantId', tenantId);
+    store.set('offlineProductCacheUpdatedAt', Date.now());
+  }
+  return { success: count > 0, count, stats: getProductCacheStats(tenantId) };
+});
+
+ipcMain.handle('search-offline-products', (event, { query, limit } = {}) => {
+  const tenantId = Number(store.get('tenantId'));
+  if (!Number.isInteger(tenantId) || tenantId <= 0) return [];
+  return searchCachedProducts(tenantId, query, limit);
+});
+
+ipcMain.handle('lookup-offline-product', (event, barcode) => {
+  const tenantId = Number(store.get('tenantId'));
+  if (!Number.isInteger(tenantId) || tenantId <= 0) return null;
+  return lookupProductByBarcode(tenantId, String(barcode || '').trim());
+});
+
+ipcMain.handle('queue-offline-sale', (event, input) => {
+  try {
+    if (!input || typeof input !== 'object') throw new Error('invalid_sale');
+    const tempId = String(input.tempId || '').trim();
+    if (!tempId || tempId.length > 120) throw new Error('invalid_temp_id');
+
+    const items = Array.isArray(input.items) ? input.items : [];
+    const payments = Array.isArray(input.payments) ? input.payments : [];
+    if (items.length === 0 || items.length > 500) throw new Error('invalid_items');
+    if (payments.length === 0 || payments.length > 20) throw new Error('invalid_payments');
+
+    const normalizedItems = items.map(item => {
+      const productId = Number(item.productId);
+      const quantity = Number(item.quantity);
+      const unitPrice = Number(item.unitPrice);
+      const taxRate = Number(item.taxRate) || 0;
+      const taxAmount = Number(item.taxAmount) || 0;
+      const lineTotal = Number(item.lineTotal);
+      if (!Number.isInteger(productId) || productId <= 0 || !Number.isFinite(quantity) || quantity <= 0 ||
+          !Number.isFinite(unitPrice) || unitPrice < 0 || !Number.isFinite(lineTotal) || lineTotal < 0 ||
+          !Number.isFinite(taxAmount) || taxAmount < 0) {
+        throw new Error('invalid_item_values');
+      }
+      return {
+        productId,
+        productName: String(item.productName || 'Producto').slice(0, 300),
+        barcode: String(item.barcode || '').slice(0, 100),
+        quantity,
+        unitPrice,
+        originalPrice: Number(item.originalPrice) || unitPrice,
+        discount: Math.max(0, Number(item.discount) || 0),
+        taxRate: taxRate > 1 ? taxRate : taxRate * 100,
+        taxAmount,
+        taxIncluded: item.taxIncluded !== false,
+        lineTotal,
+        isWeighed: Boolean(item.isWeighed),
+      };
+    });
+
+    const normalizedPayments = payments.map(payment => {
+      const amount = Number(payment.amount);
+      const change = Math.max(0, Number(payment.change) || 0);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error('invalid_payment_values');
+      return {
+        method: String(payment.method || 'cash_dop').slice(0, 30),
+        amount,
+        change,
+        reference: payment.reference ? String(payment.reference).slice(0, 200) : undefined,
+      };
+    });
+
+    const lineTotal = normalizedItems.reduce((sum, item) => sum + item.lineTotal, 0);
+    const taxAmount = normalizedItems.reduce((sum, item) => sum + item.taxAmount, 0);
+    const discountAmount = normalizedItems.reduce((sum, item) => sum + item.discount, 0);
+    const total = Math.round(lineTotal * 100) / 100;
+    const subtotal = Math.round((lineTotal - taxAmount) * 100) / 100;
+    const tendered = normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0);
+    if (tendered + 0.009 < total) throw new Error('insufficient_payment');
+
+    const sale = {
+      type: 'sale',
+      tempId,
+      items: normalizedItems,
+      payments: normalizedPayments,
+      subtotal,
+      taxAmount: Math.round(taxAmount * 100) / 100,
+      discountAmount: Math.round(discountAmount * 100) / 100,
+      total,
+      customerName: input.customerName ? String(input.customerName).slice(0, 300) : null,
+      customerRnc: input.customerRnc ? String(input.customerRnc).slice(0, 20) : null,
+      createdAt: input.createdAt && !Number.isNaN(Date.parse(input.createdAt)) ? input.createdAt : new Date().toISOString(),
+      offlineTicket: String(input.offlineTicket || tempId).slice(0, 100),
+      machineId: store.get('machineId'),
+      machineName: os.hostname(),
+      cashierName: input.cashierName ? String(input.cashierName).slice(0, 200) : 'Cajero local',
+    };
+
+    const success = queueTransaction(sale);
+    updateOfflineBanner();
+    return { success, sale, stats: getQueueStats() };
+  } catch (err) {
+    console.error('[OfflinePOS] Sale validation failed:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('open-offline-pos', () => ({ success: loadOfflinePos() }));
+ipcMain.handle('open-online-pos', async () => loadOnlinePos());
+
 ipcMain.handle('queue-offline-transaction', (event, transaction) => {
-  const { queueTransaction } = require('./database');
   const result = queueTransaction(transaction);
   // Update the banner immediately to reflect the new item
   updateOfflineBanner();
@@ -2088,9 +2449,11 @@ ipcMain.handle('bartender-browse-template', async () => {
 // ─── IPC: Get tenant info ────────────────────────────────────────────────────
 ipcMain.handle('get-tenant-info', () => {
   return {
+    id: store.get('tenantId'),
     slug: store.get('tenantSlug'),
     name: store.get('tenantName'),
     setupComplete: store.get('setupComplete'),
+    machineId: store.get('machineId'),
   };
 });
 
@@ -2397,10 +2760,14 @@ app.on('before-quit', () => {
 });
 
 // Handle single instance lock
-const gotTheLock = app.requestSingleInstanceLock();
+// Automated outage validation uses a fully isolated user-data directory and
+// local database. Permit that test instance without disturbing an installed
+// production copy that may already be minimized to the tray.
+const allowIsolatedTestInstance = process.env.CELESTE_ALLOW_MULTIPLE_INSTANCES === '1';
+const gotTheLock = allowIsolatedTestInstance || app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
-} else {
+} else if (!allowIsolatedTestInstance) {
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();

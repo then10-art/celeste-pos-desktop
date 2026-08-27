@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Celeste POS</title>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f4c81"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#sky)"/>
+  <path d="M256 76 294 190 414 192 318 262 352 378 256 310 160 378 194 262 98 192 218 190Z" fill="#fff"/>
+  <circle cx="256" cy="256" r="52" fill="#f97316"/>
+</svg>

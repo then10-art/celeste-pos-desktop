@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 720" role="img" aria-labelledby="title desc">
+  <title id="title">Colmado dominicano</title>
+  <desc id="desc">Ilustración cálida de la fachada de un colmado de barrio.</desc>
+  <defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#bae6fd"/><stop offset="1" stop-color="#fef3c7"/></linearGradient><linearGradient id="wall" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff7ed"/><stop offset="1" stop-color="#fed7aa"/></linearGradient></defs>
+  <rect width="1000" height="720" fill="url(#sky)"/>
+  <circle cx="840" cy="110" r="58" fill="#fbbf24" opacity=".9"/>
+  <path d="M0 540c160-48 330-40 492 5s330 41 508-6v181H0Z" fill="#86efac"/>
+  <rect x="118" y="180" width="764" height="390" rx="18" fill="url(#wall)" stroke="#9a3412" stroke-width="8"/>
+  <path d="M82 188h836l-66-92H148Z" fill="#0f4c81"/><path d="M126 132h748" stroke="#fff" stroke-width="22" stroke-dasharray="68 28"/>
+  <rect x="266" y="238" width="468" height="86" rx="18" fill="#fff" stroke="#f97316" stroke-width="7"/><text x="500" y="294" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="42" font-weight="800" fill="#0f4c81">COLMADO CELESTE</text>
+  <rect x="184" y="354" width="226" height="216" rx="10" fill="#7dd3fc" stroke="#0f4c81" stroke-width="8"/><path d="M297 354v216M184 462h226" stroke="#0f4c81" stroke-width="7"/>
+  <rect x="590" y="350" width="206" height="220" rx="10" fill="#7c2d12"/><rect x="620" y="390" width="146" height="82" rx="8" fill="#fef3c7"/><circle cx="752" cy="510" r="8" fill="#fbbf24"/>
+  <g fill="#15803d"><path d="M110 560c-24-94 55-114 62 0Z"/><path d="M830 560c-10-108 83-120 64 0Z"/></g>
+  <g transform="translate(438 420)"><circle cx="62" cy="34" r="28" fill="#7c3f22"/><path d="M21 145c8-70 74-70 82 0" fill="#38bdf8"/><path d="M41 64h42l-8 72H49Z" fill="#0f4c81"/></g>
+  <rect x="0" y="640" width="1000" height="80" fill="#cbd5e1"/><path d="M0 674h1000" stroke="#fff" stroke-width="8" stroke-dasharray="42 28"/>
+</svg>
