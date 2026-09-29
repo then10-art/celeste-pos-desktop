@@ -411,8 +411,11 @@ ipcMain.handle('setup-finish', async () => {
 
 // ─── Main App Launch ─────────────────────────────────────────────────────────
 async function launchMainApp() {
-  // Start local server with the best available webapp directory
-  // Prefers: cached update > bundled webapp > cloud URL fallback
+  // Start local server with the best available webapp directory.
+  // The desktop application must never fall back to a hosted page: doing so
+  // can open a provider/Manus billing page and makes the register unusable
+  // during an outage.  Cloud APIs are proxied by local-server.js only when
+  // connectivity is available; the UI itself is always local.
   try {
     const webappDir = getActiveWebappDir();
     const result = await startLocalServer(webappDir);
@@ -421,7 +424,7 @@ async function launchMainApp() {
       localServerInstance = result.server;
       console.log(`[App] Local server started on port ${localServerPort} (serving: ${webappDir})`);
     } else {
-      console.log('[App] No local webapp found — using cloud URL');
+      console.error('[App] No bundled local webapp found — starting recovery UI');
     }
   } catch (err) {
     console.error('[App] Failed to start local server:', err.message);
@@ -546,8 +549,10 @@ function createWindow() {
     url = `http://127.0.0.1:${localServerPort}/t/${tenantSlug}`;
     console.log(`[App] Loading tenant locally: ${tenantSlug} → ${url}`);
   } else {
-    url = `${CLOUD_URL}/t/${tenantSlug}`;
-    console.log(`[App] No bundled webapp available — loading cloud tenant: ${tenantSlug}`);
+    // Never navigate to CLOUD_URL here. If packaging is broken, show a local
+    // diagnostic page instead of a third-party billing/provider page.
+    url = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><meta charset="utf-8"><title>Celeste POS</title><style>body{font-family:system-ui;background:#f7fafc;color:#1a365d;display:grid;place-items:center;height:100vh;margin:0}main{max-width:620px;padding:32px;background:white;border-radius:16px;box-shadow:0 8px 30px #0001}h1{margin-top:0}p{line-height:1.5}.code{font-family:monospace;background:#edf2f7;padding:8px;border-radius:6px}</style><main><h1>Celeste POS</h1><p>No se encontró la interfaz local incluida en este instalador.</p><p>Instale la versión más reciente desde <span class="code">celestepos.live</span> o contacte al administrador.</p><p>Sus datos locales no se enviaron a ningún sitio externo.</p></main>`)}`;
+    console.error('[App] Local webapp unavailable; refusing cloud fallback');
   }
   // Add cache-busting timestamp and disable caching headers
   const cacheBustUrl = `${url}${url.includes('?') ? '&' : '?'}_cb=${Date.now()}`;
